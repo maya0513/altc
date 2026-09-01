@@ -1,12 +1,10 @@
 # examples
 
-このdirectoryのprogramは、現在の実装で解析・C11生成・build・実行できる統合例です。
-小さな構文例ではなく、複数の言語機能が同じ実行経路で正しく組み合わさることを確認します。
+このdirectoryのprogramは、現在の実装で解析・C11生成・build・実行できる統合例です。小さな構文例ではなく、複数の言語機能が同じ実行経路で正しく組み合わさることを確認します。
 
 ## feature showcase
 
-[feature_showcase.altc](feature_showcase.altc)は、一件の計測値を検証・正規化する小さなbatch
-processorです。次を一つのprogramで使用します。
+[feature_showcase.altc](feature_showcase.altc)は、一件の計測値を検証・正規化する小さなbatch processorです。次を一つのprogramで使用します。
 
 - module/local `const`、型推論、mutable binding、全primitive型family
 - `@repr(C)` struct・payloadなしenum、payload enumとpattern matching

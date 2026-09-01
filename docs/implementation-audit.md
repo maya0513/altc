@@ -1,8 +1,6 @@
 # 実装監査と既知課題
 
-最終更新は2026-09-01です。テストと実装を正本として、coverageの未到達行、意味解析とC backend
-の責務境界、CLIの外部toolchain経路、strict C11での統合実行を監査しました。将来仕様の一覧では
-なく、再現できた問題と次に実行可能な保守課題を記録します。
+最終更新は2026-09-01です。テストと実装を正本として、coverageの未到達行、意味解析とC backendの責務境界、CLIの外部toolchain経路、strict C11での統合実行を監査しました。将来仕様の一覧ではなく、再現できた問題と次に実行可能な保守課題を記録します。
 
 ## この監査で解決した問題
 
@@ -18,16 +16,11 @@
 
 ### P1: 診断の修正手順が不足している
 
-[repair corpus](../eval/repair/)の多くは正しいcodeとspanを返しますが、`help`が空で、宣言位置を
-secondary labelとして示しません。たとえばimmutable bindingへの代入では、利用者が行う編集
-「宣言に`mut`を追加する」を直接提示できていません。頻度の高い診断からhelpと関連spanを追加し、
-snapshotを意図的に更新する必要があります。
+[repair corpus](../eval/repair/)の多くは正しいcodeとspanを返しますが、`help`が空で、宣言位置をsecondary labelとして示しません。たとえばimmutable bindingへの代入では、利用者が行う編集「宣言に`mut`を追加する」を直接提示できていません。頻度の高い診断からhelpと関連spanを追加し、snapshotを意図的に更新する必要があります。
 
 ### P2: 意味解析とbackendのfileが大きい
 
-`semantics.rs`と`codegen.rs`は、型検査、effect/control検査、memory event、C ABI、式lowering、cleanup
-挿入をそれぞれ大きなfileに保持しています。今回のような同じ意味の再推論を防ぐため、次の分割は
-ASTの形ではなくpassの所有dataを境界にします。
+`semantics.rs`と`codegen.rs`は、型検査、effect/control検査、memory event、C ABI、式lowering、cleanup挿入をそれぞれ大きなfileに保持しています。今回のような同じ意味の再推論を防ぐため、次の分割はASTの形ではなくpassの所有dataを境界にします。
 
 1. 型・place・pattern検査
 2. effect/controlとmemory summary
@@ -38,16 +31,11 @@ ASTの形ではなくpassの所有dataを境界にします。
 
 ### P2: coverage 100%は未達
 
-通常gateは製品codeのline coverage 98%を要求し、長期目標は100%です。未到達行にはfilesystem・
-toolchain failureの防御経路とparser/backendの回復経路が残っています。到達不能扱いで除外せず、
-observableな失敗をassertするtestを追加します。現在値は`cargo xtask coverage --minimum 100`で
-継続確認します。
+通常gateは製品codeのline coverage 98%を要求し、長期目標は100%です。未到達行にはfilesystem・toolchain failureの防御経路とparser/backendの回復経路が残っています。到達不能扱いで除外せず、observableな失敗をassertするtestを追加します。現在値は`cargo xtask coverage --minimum 100`で継続確認します。
 
 ### P2: 単一file v0の機能制限
 
-複数module、generic、slice/array、callbackを含む広いC surfaceなどは未実装です。これは現行
-実装の欠陥を隠すものではなく、[現行言語](language.md#現在対象外)が明示する製品範囲です。
-実装するときは、未実装診断を成功testへ置換してから文書を更新します。
+複数module、generic、slice/array、callbackを含む広いC surfaceなどは未実装です。これは現行実装の欠陥を隠すものではなく、[現行言語](language.md#現在対象外)が明示する製品範囲です。実装するときは、未実装診断を成功testへ置換してから文書を更新します。
 
 ## 継続監査の入口
 
@@ -57,5 +45,4 @@ observableな失敗をassertするtestを追加します。現在値は`cargo xt
 - 生成物size: `cargo xtask perf --check`
 - wall-clock参考値: `cargo xtask bench --json target/bench/pipeline.json`
 
-新しい問題は最小probe、P0/P1/P2、期待結果、回帰testをこの文書または
-[言語評価所見](../eval/findings/)へ追加します。
+新しい問題は最小probe、P0/P1/P2、期待結果、回帰testをこの文書または[言語評価所見](../eval/findings/)へ追加します。

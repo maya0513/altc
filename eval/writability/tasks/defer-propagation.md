@@ -1,4 +1,3 @@
 # nested deferとerror退出
 
-内側と外側のscopeへ一つずつdeferを登録した後、typed errorを伝播する。catchで終了codeを
-0へ変換し、出力順が内側から外側のLIFOになることを確かめる。
+内側と外側のscopeへ一つずつdeferを登録した後、typed errorを伝播する。catchで終了codeを0へ変換し、出力順が内側から外側のLIFOになることを確かめる。

@@ -4,8 +4,7 @@
 
 ## 正本と文書
 
-現在のobservable behaviorはテスト、その他の現在挙動は実装を正とします。文書はその要約であり、
-独立した将来仕様ではありません。
+現在のobservable behaviorはテスト、その他の現在挙動は実装を正とします。文書はその要約であり、独立した将来仕様ではありません。
 
 1. 振る舞いを変更するときは、期待結果を表す成功testと必要な失敗testを同じ変更へ含める。
 2. 実装と文書が矛盾したら、まずtestで意図を確定し、文書を実装へ合わせるか削除する。
@@ -20,9 +19,7 @@
 4. 診断を、利用者が次の修正を選べる内容にする。
 5. その上で構文、性能、実装保守性を改善する。
 
-P0は誤生成・誤受理・誤実行などのsilent wrong、P1はcrash・正しいcodeの拒否・修正不能な
-診断、P2は新機能・探索・通常refactorです。P0を発見した変更には最小再現testと修正を必ず
-含めます。
+P0は誤生成・誤受理・誤実行などのsilent wrong、P1はcrash・正しいcodeの拒否・修正不能な診断、P2は新機能・探索・通常refactorです。P0を発見した変更には最小再現testと修正を必ず含めます。
 
 ## 実装規則
 
@@ -35,12 +32,9 @@ P0は誤生成・誤受理・誤実行などのsilent wrong、P1はcrash・正�
 
 ## tool version
 
-通常開発とCIは、作業時点で確認できる最新安定版のtoolを使用します。Rust stableは
-`rust-toolchain.toml`、外部toolはCIと開発commandでversionを一致させます。GitHub Actionsも
-保守されている最新majorを使用します。version更新時はlockfileを更新し、完全gateを通します。
+通常開発とCIは、作業時点で確認できる最新安定版のtoolを使用します。Rust stableは`rust-toolchain.toml`、外部toolはCIと開発commandでversionを一致させます。GitHub Actionsも保守されている最新majorを使用します。version更新時はlockfileを更新し、完全gateを通します。
 
-MSRV jobだけは互換性検査のため、意図的に`Cargo.toml`の`rust-version`を使用します。これは
-通常toolchainを古いversionへ固定するものではありません。
+MSRV jobだけは互換性検査のため、意図的に`Cargo.toml`の`rust-version`を使用します。これは通常toolchainを古いversionへ固定するものではありません。
 
 ## 変更別の検証
 
