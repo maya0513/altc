@@ -1,0 +1,41 @@
+{
+  "cases": {
+    "basic": {
+      "ffi_bytes": 0,
+      "header_bytes": 0,
+      "input": "tests/fixtures/basic.altc",
+      "source_bytes": 1473
+    },
+    "data-control": {
+      "ffi_bytes": 0,
+      "header_bytes": 0,
+      "input": "tests/fixtures/data_control.altc",
+      "source_bytes": 2800
+    },
+    "effects": {
+      "ffi_bytes": 257,
+      "header_bytes": 0,
+      "input": "tests/fixtures/effects.altc",
+      "source_bytes": 2629
+    },
+    "feature-showcase": {
+      "ffi_bytes": 912,
+      "header_bytes": 661,
+      "input": "examples/feature_showcase.altc",
+      "source_bytes": 22948
+    },
+    "library": {
+      "ffi_bytes": 0,
+      "header_bytes": 363,
+      "input": "tests/fixtures/library.altc",
+      "source_bytes": 935
+    },
+    "overflow": {
+      "ffi_bytes": 0,
+      "header_bytes": 0,
+      "input": "tests/fixtures/overflow.altc",
+      "source_bytes": 3257
+    }
+  },
+  "tolerance_percent": 2
+}

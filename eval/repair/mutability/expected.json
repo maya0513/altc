@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3008",
+    "end": {
+      "column": 8,
+      "line": 3
+    },
+    "file": "eval/repair/mutability/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 51,
+          "start": 46
+        }
+      }
+    ],
+    "message": "assignment target is not mutable",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 51,
+      "start": 46
+    },
+    "start": {
+      "column": 3,
+      "line": 3
+    }
+  }
+]

@@ -1,0 +1,30 @@
+extern "C" from <stdio.h> {
+  fn puts(message: *const c_char) -> c_int;
+}
+
+enum Failure {
+  Negative,
+}
+
+fn checked(value: i32) -> i32 with { raise[Failure] } {
+  if value < 0 {
+    raise Failure::Negative;
+  };
+  value
+}
+
+fn work(value: i32) -> i32 with { raise[Failure] } {
+  defer {
+    puts(c"cleanup");
+  }
+  checked(value)?
+}
+
+@entry
+fn application_main() -> c_int {
+  try {
+    work(7)? as c_int
+  } catch {
+    Failure::Negative => 1,
+  }
+}

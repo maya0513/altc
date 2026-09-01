@@ -1,0 +1,37 @@
+name: Advisory benchmark
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - run: cargo xtask bench --json target/bench/pipeline.json
+      - name: Write benchmark summary
+        run: |
+          {
+            echo '## altc compiler pipeline'
+            echo
+            echo '| benchmark | ns/op | MiB/s | iterations |'
+            echo '| --- | ---: | ---: | ---: |'
+            jq -r '.records[] | "| `\(.name)` | \(.nanos_per_operation | floor) | \(.mebibytes_per_second * 100 | floor / 100) | \(.iterations) |"' target/bench/pipeline.json
+            echo
+            echo 'Wall-clock値はshared runner上の参考値であり、jobの成否判定には使いません。'
+          } > target/bench/summary.md
+          cat target/bench/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pipeline-benchmark-${{ runner.os }}
+          path: |
+            target/bench/pipeline.json
+            target/bench/summary.md
+          if-no-files-found: error

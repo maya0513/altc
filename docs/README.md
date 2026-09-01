@@ -1,29 +1,26 @@
 # altcドキュメント
 
-このディレクトリは、altcの思想、Draft規範仕様、コンパイラ設計、非規範的な例を読者と責務ごとに分けています。
+このディレクトリは、現在のコンパイラとCLIが実際に提供する機能だけを説明します。構想上の将来仕様は含めません。
 
-## 文書の位置付け
+## 正本
 
-| 文書 | 読者 | 規範性 |
-| --- | --- | --- |
-| [言語コンセプト](concept.md) | 言語利用者・設計者 | 設計意図と非目標を説明する。個別構文の正本ではない |
-| [Draft規範仕様](spec/README.md) | 実装者・言語利用者・ツール作者 | 現在の言語契約の唯一の正本 |
-| [設計資料](design/compiler-architecture.md) | コンパイラ・ツール実装者 | 仕様を満たすための設計方針。内部構造は変更可能 |
-| [対照例](examples/README.md) | 言語利用者・実装者 | 非規範的。生成Cの一例でありgolden outputではない |
-| [設計判断](decisions/README.md) | 言語設計者・実装者 | 主要な選択肢と採用理由。言語の意味は仕様側を正本とする |
-| [実行可能v0の実装状況](implementation-status.md) | 利用者・実装者 | 非規範的。現在動作する範囲と制約を記録する |
-| [テスト・カバレッジ・ベンチマーク](testing-and-benchmarks.md) | 実装者 | 非規範的。品質計測方法、回帰下限、性能基準値を記録する |
-| [用語集](glossary.md) | すべての読者 | 文書間で使う語の意味を統一する |
+言語とtoolingの正本は[テスト](../tests/)と[実装](../crates/)です。テストは維持するべき
+observable behaviorを固定し、実装はそれ以外の現在の挙動を定めます。文書と食い違う場合は
+文書が古いものとして修正または削除します。文書だけを根拠に未実装機能を追加したり、既存の
+test contractを変更したりしません。
 
-仕様と他文書が矛盾する場合は、`docs/spec/`を優先します。正式リリース前のDraft仕様は、理由を記録した仕様変更によって更新できます。実装の都合だけで、仕様と異なる動作を暗黙に採用してはなりません。
+## 現行文書
 
-## 読み順
+| 文書 | 内容 |
+| --- | --- |
+| [現行言語](language.md) | 現在受理される型、宣言、式、effect、C連携と対象外機能 |
+| [CLI](cli.md) | `check`、`emit-c`、`build`、`run`と共通option |
+| [compiler](compiler.md) | 公開Rust API、解析pipeline、C11 backend |
+| [実装監査](implementation-audit.md) | 解決したP0/P1、既知課題、継続監査の入口 |
+| [テストと性能](testing-and-benchmarks.md) | 標準gate、coverage、評価corpus、benchmark |
+| [開発方針](development-policy.md) | 正本、優先順位、変更手順、tool version方針 |
+| [言語評価](../eval/README.md) | writabilityとrepair corpus、評価rubric、所見 |
+| [統合examples](../examples/README.md) | 主要言語機能を組み合わせたbuild/run可能なprogram |
+| [contribution guide](../CONTRIBUTING.md) | contributor向けの実行手順 |
 
-初めて読む場合は、[言語コンセプト](concept.md)、[仕様索引](spec/README.md)、[基本例](examples/basics.md)の順を推奨します。コンパイラへ着手する場合は、続けて[設計判断](decisions/README.md)、[コンパイラ構成](design/compiler-architecture.md)、[C11 lowering](design/c11-lowering.md)を参照してください。
-
-## 記述規則
-
-- `altc`コードには`altc`、C11コードには`c`のコードフェンスを使います。
-- 仕様で意図的に実装へ委ねる事項は、未決の課題ではなく`implementation-defined`と明記します。
-- 内部生成名、最適化、一時変数、helper、非公開型の配置は、公開契約として明記されない限り非規範的です。
-- 不採用の機能は構文仕様へ混在させず、[コンセプトの非目標](concept.md#非目標)へ集約します。
+文書中のaltc codeは`cargo xtask docs`で解析・C11生成・実行または診断codeまで検査します。

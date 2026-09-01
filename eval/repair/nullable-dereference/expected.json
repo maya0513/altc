@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3021",
+    "end": {
+      "column": 11,
+      "line": 2
+    },
+    "file": "eval/repair/nullable-dereference/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 49,
+          "start": 41
+        }
+      }
+    ],
+    "message": "nullable pointers must be refined with `nonnull(...)` before dereference",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 49,
+      "start": 41
+    },
+    "start": {
+      "column": 3,
+      "line": 2
+    }
+  }
+]

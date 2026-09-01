@@ -1,0 +1,7 @@
+extern "C" from <stdlib.h> {
+  fn malloc(size: usize) -> ?*mut unit with { alloc };
+}
+
+fn allocate() -> ?*mut unit {
+  malloc(1usize)
+}

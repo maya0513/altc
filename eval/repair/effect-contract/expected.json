@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3103",
+    "end": {
+      "column": 2,
+      "line": 7
+    },
+    "file": "eval/repair/effect-contract/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 135,
+          "start": 87
+        }
+      }
+    ],
+    "message": "function `allocate` performs undeclared effect `alloc`",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 135,
+      "start": 87
+    },
+    "start": {
+      "column": 1,
+      "line": 5
+    }
+  }
+]

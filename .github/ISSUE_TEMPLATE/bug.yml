@@ -1,0 +1,43 @@
+name: Bug report
+description: 誤動作、crash、誤診断を再現可能な形で報告する
+title: "bug: "
+body:
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度
+      description: P0はsilent wrong、P1はcrash・正しいcodeの拒否・修正不能な診断です。
+      options:
+        - P0 — 誤生成・誤受理・誤実行
+        - P1 — crash・誤拒否・修正不能な診断
+        - P2 — その他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小再現例
+      description: 単一のaltc sourceと実行したcommandを記載してください。
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の結果
+      description: 診断code、終了code、生成Cの差などを含めてください。
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: revisionと環境
+      placeholder: commit、OS、rustc、cc
+    validations:
+      required: true

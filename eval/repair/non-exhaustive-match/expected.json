@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3037",
+    "end": {
+      "column": 4,
+      "line": 9
+    },
+    "file": "eval/repair/non-exhaustive-match/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 113,
+          "start": 72
+        }
+      }
+    ],
+    "message": "non-exhaustive match",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 113,
+      "start": 72
+    },
+    "start": {
+      "column": 3,
+      "line": 7
+    }
+  }
+]

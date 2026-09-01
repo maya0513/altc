@@ -12,6 +12,21 @@ fn altc() -> Command {
     command
 }
 
+fn assert_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn ndjson(stdout: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one valid JSON record per line"))
+        .collect()
+}
+
 #[test]
 fn checks_and_reports_json_diagnostics() {
     let output = altc()
@@ -254,6 +269,57 @@ fn preserves_literal_values_and_escapes_in_c11() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "line\nλ\n");
+}
+
+#[test]
+fn checks_and_runs_the_integrated_feature_showcase() {
+    let checked = altc()
+        .args([
+            "check",
+            "examples/feature_showcase.altc",
+            "--ffi",
+            "--show-memory-summary",
+            "--message-format",
+            "json",
+            "--cflag=-Werror",
+        ])
+        .output()
+        .expect("check integrated feature showcase");
+    assert_success(&checked);
+
+    let records = ndjson(&checked.stdout);
+    let run_batch = records
+        .iter()
+        .find(|record| {
+            record["kind"] == "memory-summary" && record["summary"]["function"] == "run_batch"
+        })
+        .expect("run_batch memory summary");
+    let categories = run_batch["summary"]["categories"]
+        .as_array()
+        .expect("memory categories");
+    for expected in ["indirect-read", "indirect-write", "extern-call"] {
+        assert!(
+            categories.iter().any(|category| category == expected),
+            "missing {expected}: {categories:?}"
+        );
+    }
+
+    let executed = altc()
+        .args(["run", "examples/feature_showcase.altc", "--cflag=-Werror"])
+        .output()
+        .expect("run integrated feature showcase");
+    assert_eq!(
+        executed.status.code(),
+        Some(42),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&executed.stdout), "step\nrelease\n");
+
+    let generated = workspace().join("target/altc/feature_showcase/feature_showcase.c");
+    let source = fs::read_to_string(generated).expect("generated feature showcase C");
+    assert!(source.contains("UINT64_C(18446744073709551615)"));
+    assert!(source.contains("INT64_MIN"));
 }
 
 #[test]

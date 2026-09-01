@@ -1,0 +1,11 @@
+enum Failure {
+  Failed,
+}
+
+fn fail() -> i32 with { raise[Failure] } {
+  raise Failure::Failed;
+}
+
+fn caller() -> i32 with { raise[Failure] } {
+  fail()
+}

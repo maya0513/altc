@@ -1,0 +1,221 @@
+const EXPECTED_SCORE: i32 = 42;
+const MAX_SEQUENCE: u64 = 18446744073709551615u64;
+const MIN_SEQUENCE: i64 = -9223372036854775808i64;
+
+@repr(C)
+pub struct Reading {
+  pub value: i32,
+  pub weight: i32,
+}
+
+@repr(C)
+pub enum Mode {
+  Safe,
+  Fast,
+}
+
+@repr(C)
+pub enum AppError {
+  InvalidReading,
+  OutOfMemory,
+}
+
+enum Decision {
+  Accept(i32),
+  Reject(AppError),
+  Idle,
+}
+
+extern "C" from <stdlib.h> {
+  fn malloc(size: usize) -> ?*mut unit with { alloc };
+  fn free(pointer: *mut unit) with { free };
+}
+
+extern "C" from <stdio.h> {
+  @c_typedef("FILE") opaque type CFile;
+  fn tmpfile() -> ?*mut CFile;
+  fn fclose(stream: *mut CFile) -> c_int;
+  fn puts(message: *const c_char) -> c_int;
+}
+
+@c_name("feature_score")
+export "C" fn score(reading: Reading, mode: Mode) -> i32 {
+  if mode == Mode::Safe {
+    reading.value * reading.weight
+  } else {
+    reading.value + reading.weight
+  }
+}
+
+@c_name("feature_normalize")
+export "C" fn normalize(reading: Reading) -> i32 with { raise[AppError] } {
+  if reading.value < 0 || reading.weight <= 0 {
+    raise AppError::InvalidReading;
+  };
+  score(reading, Mode::Safe)
+}
+
+fn classify(reading: Reading, enabled: bool) -> Decision {
+  if !enabled {
+    Decision::Idle()
+  } else if reading.value < 0 {
+    Decision::Reject(AppError::InvalidReading)
+  } else {
+    Decision::Accept(score(reading, Mode::Safe))
+  }
+}
+
+fn decision_value(decision: Decision) -> i32 {
+  match decision {
+    Decision::Accept(value) => value,
+    Decision::Reject(error) => match error {
+      AppError::InvalidReading => -1,
+      AppError::OutOfMemory => -2,
+    },
+    Decision::Idle => 0,
+  }
+}
+
+fn scalar_probe() -> bool {
+  let signed8: i8 = -8i8;
+  let signed16: i16 = -16i16;
+  let signed32: i32 = -32;
+  let signed64: i64 = MIN_SEQUENCE;
+  let unsigned8: u8 = 8u8;
+  let unsigned16: u16 = 16u16;
+  let unsigned32: u32 = 32u32;
+  let unsigned64: u64 = MAX_SEQUENCE;
+  let sized: isize = -1isize;
+  let unsized: usize = sizeof[Reading];
+  let c_signed: c_longlong = -64;
+  let c_unsigned: c_ulonglong = 64;
+  let float32: f32 = 1.5f32;
+  let float64: f64 = 2.5f64;
+  let c_float_value: c_float = 3.5;
+  let c_double_value: c_double = 4.5;
+  let c_long_double_value: c_longdouble = 5.5;
+  signed8 < 0i8 && signed16 < 0i16 && signed32 < 0 && signed64 < 0i64 &&
+    unsigned8 == 8u8 && unsigned16 == 16u16 && unsigned32 == 32u32 &&
+    unsigned64 > 0u64 && sized < 0isize && unsized >= alignof[Reading] &&
+    c_signed < 0 && c_unsigned == 64 && float32 < float64 as f32 &&
+    c_float_value < c_double_value as c_float &&
+    c_long_double_value > c_double_value as c_longdouble
+}
+
+fn operator_probe() -> bool {
+  let mut saturated: u8 = 250u8;
+  saturated +|= 20u8;
+  let wrapped: u8 = 250u8 +% 10u8;
+  let saturated_sub: u8 = 2u8 -| 5u8;
+  let saturated_mul: i8 = 100i8 *| 2i8;
+  let mut bits: u32 = 10u32;
+  bits = ((bits << 1u32) | (bits >> 1u32)) ^ (bits & 3u32);
+  let inverted: u32 = ~bits;
+  saturated == 255u8 && wrapped == 4u8 && saturated_sub == 0u8 &&
+    saturated_mul == 127i8 && inverted != bits
+}
+
+fn text_probe() -> bool {
+  const LABEL_BYTES: usize = 5usize;
+  let label: str = "batch";
+  let lambda: char = '\u{03bb}';
+  label.byte_len == LABEL_BYTES && lambda as u32 == 955u32
+}
+
+fn stream_probe() -> bool {
+  match tmpfile() {
+    nonnull(stream) => {
+      defer {
+        fclose(stream);
+      }
+      true
+    },
+    null => true,
+  }
+}
+
+fn error_cleanup_probe() -> bool {
+  let mut cleaned: bool = false;
+  let result: i32 = try {
+    defer {
+      cleaned = true;
+    }
+    normalize(Reading { value: -1, weight: 1, })?
+  } catch {
+    AppError::InvalidReading => 1,
+    AppError::OutOfMemory => 2,
+  };
+  cleaned && result == 1
+}
+
+fn run_batch() -> i32 with { alloc, free } {
+  let reading: *mut Reading = match malloc(sizeof[Reading]) {
+    nonnull(raw) => ptr_cast_mut[Reading](raw),
+    null => return 2,
+  };
+  defer {
+    puts(c"release");
+    free(ptr_cast[unit](reading));
+  }
+
+  reading->value = 6;
+  reading->weight = 7;
+  let immutable: *const Reading = ptr_as_const(reading);
+  let address: usize = ptr_addr(immutable);
+  let recovered: ?*mut Reading = ptr_from_addr_mut[Reading](address);
+  let recovered_const: ?*const Reading = ptr_from_addr[Reading](address);
+  let same: *mut Reading = offset[Reading](reading, 0isize);
+  let first_field: *mut i32 = ptr_cast_mut[i32](same);
+
+  let mut total: i32 = 0;
+  try {
+    let mut index: i32 = 0;
+    while index < 1 {
+      defer {
+        puts(c"step");
+      }
+      total += normalize(*same)?;
+      index += 1;
+    };
+  } catch {
+    AppError::InvalidReading => return 3,
+    AppError::OutOfMemory => return 4,
+  };
+
+  for (let mut index: i32 = 0; index < 3; index += 1) {
+    if index == 0 {
+      continue;
+    };
+    if index == 2 {
+      break;
+    };
+    total += 1;
+  };
+  for (;;) {
+    break;
+  };
+
+  let pointer_value: i32 = match recovered {
+    nonnull(value) => value->value,
+    null => 0,
+  };
+  let const_pointer_value: i32 = match recovered_const {
+    nonnull(value) => value->value,
+    null => 0,
+  };
+  let direct_value: i32 = *first_field;
+  let selected: i32 = decision_value(classify(*reading, true));
+
+  if pointer_value == 6 && const_pointer_value == 6 && direct_value == 6 &&
+    selected == EXPECTED_SCORE && scalar_probe() && operator_probe() &&
+    text_probe() && stream_probe() && error_cleanup_probe() {
+    total - 1
+  } else {
+    5
+  }
+}
+
+@entry
+fn application_main() -> c_int with { alloc, free } {
+  run_batch() as c_int
+}

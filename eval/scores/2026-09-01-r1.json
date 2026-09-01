@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-01",
+  "base_commit": "8c42435",
+  "command": "cargo xtask eval",
+  "scale": "1 (利用を妨げる) - 5 (自然で修正も容易)",
+  "scores": {
+    "syntax_writability": {
+      "score": 3.5,
+      "note": "C風制御構文は読み書きしやすいが、明示castとpointer builtinの定型記述が残る"
+    },
+    "semantic_consistency": {
+      "score": 4.0,
+      "note": "mutability、nullability、網羅的matchの境界が明示される"
+    },
+    "effect_memory_comprehension": {
+      "score": 4.0,
+      "note": "signature effectとmemory summaryで局所・推移costを追跡できる"
+    },
+    "diagnostic_actionability": {
+      "score": 3.0,
+      "note": "安定codeとspanはあるが、多くの診断に具体的な修正helpがない"
+    },
+    "c_interop_honesty": {
+      "score": 4.0,
+      "note": "公開headerとFFI検証TUがABI契約を可視化する"
+    },
+    "repair_convergence": {
+      "score": 4.0,
+      "note": "8系統すべてが一つの局所修正で成功sourceへ収束する"
+    }
+  }
+}

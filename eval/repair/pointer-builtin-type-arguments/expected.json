@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3019",
+    "end": {
+      "column": 25,
+      "line": 2
+    },
+    "file": "eval/repair/pointer-builtin-type-arguments/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 65,
+          "start": 43
+        }
+      }
+    ],
+    "message": "`ptr_addr` expects no type arguments and one value argument",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 65,
+      "start": 43
+    },
+    "start": {
+      "column": 3,
+      "line": 2
+    }
+  }
+]

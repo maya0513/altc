@@ -1,0 +1,4 @@
+fn choose() -> i32 {
+  let enabled: bool = true;
+  if enabled { 1 } else { 0 }
+}

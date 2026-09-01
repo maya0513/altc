@@ -1,0 +1,4 @@
+@entry
+fn application_main() -> c_int {
+  0
+}

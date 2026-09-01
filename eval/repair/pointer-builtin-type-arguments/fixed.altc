@@ -1,0 +1,3 @@
+fn address(pointer: *mut i32) -> usize {
+  ptr_addr(pointer)
+}

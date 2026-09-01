@@ -6,13 +6,13 @@ mod diagnostic;
 mod lexer;
 mod literal;
 mod parser;
-mod sema;
+mod semantics;
 mod syntax;
 
 pub use codegen::{CodegenOptions, GeneratedUnit, emit_c};
 pub use diagnostic::{Diagnostic, Label, Severity, SourcePosition, Span};
 pub use lexer::{Lexed, Token, TokenKind, lex};
-pub use sema::{Analysis, AnalyzeOptions, Effect, MemoryCategory, MemorySummary, analyze};
+pub use semantics::{Analysis, AnalyzeOptions, Effect, MemoryCategory, MemorySummary, analyze};
 pub use syntax::{AltcLanguage, SyntaxKind, SyntaxNode};
 
 /// A UTF-8 source file supplied to the compiler.

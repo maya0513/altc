@@ -1,0 +1,46 @@
+{
+  "cases": [
+    {
+      "id": "basic-control",
+      "task": "tasks/basic-control.md",
+      "source": "golden/basic-control.altc",
+      "expected_exit": 75
+    },
+    {
+      "id": "data-model",
+      "task": "tasks/data-model.md",
+      "source": "golden/data-model.altc",
+      "expected_exit": 8
+    },
+    {
+      "id": "pointer-memory",
+      "task": "tasks/pointer-memory.md",
+      "source": "golden/pointer-memory.altc",
+      "expected_exit": 7,
+      "expected_memory": {
+        "function": "application_main",
+        "categories": ["indirect-read", "indirect-write", "extern-call"]
+      }
+    },
+    {
+      "id": "effects-errors",
+      "task": "tasks/effects-errors.md",
+      "source": "golden/effects-errors.altc",
+      "expected_exit": 7,
+      "expected_stdout": "cleanup\n"
+    },
+    {
+      "id": "defer-propagation",
+      "task": "tasks/defer-propagation.md",
+      "source": "golden/defer-propagation.altc",
+      "expected_exit": 0,
+      "expected_stdout": "inner\nouter\n"
+    },
+    {
+      "id": "c-abi",
+      "task": "tasks/c-abi.md",
+      "source": "golden/c-abi.altc",
+      "expect_public_header": true
+    }
+  ]
+}

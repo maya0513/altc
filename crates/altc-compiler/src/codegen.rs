@@ -4,7 +4,7 @@ use crate::Analysis;
 use crate::ast::*;
 use crate::diagnostic::{Diagnostic, Span, position};
 use crate::literal::{decode_quoted, parse_integer};
-use crate::sema::{FloatType, FunctionInfo, IntType, SemanticModel, Type};
+use crate::semantics::{FloatType, FunctionInfo, IntType, SemanticModel, Type};
 
 #[derive(Clone, Debug)]
 pub struct CodegenOptions {
@@ -531,6 +531,13 @@ impl<'a> Generator<'a> {
             ExprKind::Path(path) if path.len() == 1 => const_name(&path[0]),
             ExprKind::Path(path) => enum_value(path, &self.analysis.model),
             ExprKind::Unary { operator, value } => {
+                if *operator == UnaryOp::Negate {
+                    if let Some(ty) = self.analysis.model.expression_types.get(&expression.id) {
+                        if let Some(minimum) = signed_minimum_c(value, ty) {
+                            return minimum;
+                        }
+                    }
+                }
                 format!("({}{})", unary_c(*operator), self.const_expression(value))
             }
             ExprKind::Binary {
@@ -713,7 +720,7 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
                 self.emit_match(value, arms, self.expression_type(expression))
             }
             ExprKind::Try { body, arms } => {
-                self.emit_try(body, arms, self.expression_type(expression))
+                self.emit_try(expression.id, body, arms, self.expression_type(expression))
             }
             ExprKind::While { condition, body } => {
                 self.emit_while(condition, body);
@@ -762,6 +769,8 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             ExprKind::Unary { operator, value } => match operator {
                 UnaryOp::Address => format!("(&({}))", self.emit_place(value)),
                 UnaryOp::Dereference => format!("(*({}))", self.emit_value(value)),
+                UnaryOp::Negate => signed_minimum_c(value, &self.expression_type(expression))
+                    .unwrap_or_else(|| format!("(-{})", self.emit_value(value))),
                 _ => format!("({}{})", unary_c(*operator), self.emit_value(value)),
             },
             ExprKind::Binary {
@@ -1121,8 +1130,20 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
         result.unwrap_or_default()
     }
 
-    fn emit_try(&mut self, body: &Block, arms: &[MatchArm], ty: Type) -> String {
-        let error_type = find_error_type(body, self.analysis).unwrap_or(Type::Unknown);
+    fn emit_try(
+        &mut self,
+        expression: ExprId,
+        body: &Block,
+        arms: &[MatchArm],
+        ty: Type,
+    ) -> String {
+        let error_type = self
+            .analysis
+            .model
+            .try_error_types
+            .get(&expression)
+            .cloned()
+            .unwrap_or(Type::Unknown);
         let result = (ty != Type::Unit).then(|| {
             let value = self.new_temporary();
             self.output.line(&format!("{} {value};", c_type(&ty)));
@@ -1595,44 +1616,22 @@ fn function_c_name(info: &FunctionInfo) -> String {
 
 fn resolve_type(model: &SemanticModel, reference: &TypeRef) -> Type {
     match reference {
-        TypeRef::Named { path, .. } if path.len() == 1 => match path[0].as_str() {
-            "unit" => Type::Unit,
-            "bool" => Type::Bool,
-            "char" => Type::Char,
-            "str" => Type::Str,
-            "i8" => Type::Int(IntType::I8),
-            "i16" => Type::Int(IntType::I16),
-            "i32" => Type::Int(IntType::I32),
-            "i64" => Type::Int(IntType::I64),
-            "u8" => Type::Int(IntType::U8),
-            "u16" => Type::Int(IntType::U16),
-            "u32" => Type::Int(IntType::U32),
-            "u64" => Type::Int(IntType::U64),
-            "isize" => Type::Int(IntType::Isize),
-            "usize" => Type::Int(IntType::Usize),
-            "c_char" => Type::Int(IntType::CChar),
-            "c_schar" => Type::Int(IntType::CSChar),
-            "c_uchar" => Type::Int(IntType::CUChar),
-            "c_short" => Type::Int(IntType::CShort),
-            "c_ushort" => Type::Int(IntType::CUShort),
-            "c_int" => Type::Int(IntType::CInt),
-            "c_uint" => Type::Int(IntType::CUInt),
-            "c_long" => Type::Int(IntType::CLong),
-            "c_ulong" => Type::Int(IntType::CULong),
-            "c_longlong" => Type::Int(IntType::CLongLong),
-            "c_ulonglong" => Type::Int(IntType::CULongLong),
-            "f32" => Type::Float(FloatType::F32),
-            "f64" => Type::Float(FloatType::F64),
-            "c_float" => Type::Float(FloatType::CFloat),
-            "c_double" => Type::Float(FloatType::CDouble),
-            "c_longdouble" => Type::Float(FloatType::CLongDouble),
-            name if model.structs.contains_key(name) => Type::Struct(name.to_owned()),
-            name if model.enums.contains_key(name) => Type::Enum(name.to_owned()),
-            name if model.opaque_types.contains_key(name) => {
-                Type::Opaque(model.opaque_types[name].clone())
-            }
-            _ => Type::Unknown,
-        },
+        TypeRef::Named { path, .. } if path.len() == 1 => {
+            crate::semantics::primitive_type(&path[0])
+                .or_else(|| {
+                    let name = &path[0];
+                    if model.structs.contains_key(name) {
+                        Some(Type::Struct(name.to_owned()))
+                    } else if model.enums.contains_key(name) {
+                        Some(Type::Enum(name.to_owned()))
+                    } else if model.opaque_types.contains_key(name) {
+                        Some(Type::Opaque(model.opaque_types[name].clone()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(Type::Unknown)
+        }
         TypeRef::Pointer {
             nullable,
             mutable,
@@ -2004,9 +2003,9 @@ fn expression_has_direct_break(expression: &Expr) -> bool {
     }
 }
 
-fn literal_c(literal: &Literal, _ty: Option<&Type>) -> String {
+fn literal_c(literal: &Literal, ty: Option<&Type>) -> String {
     match literal {
-        Literal::Int(raw) => integer_c(raw),
+        Literal::Int(raw) => integer_c(raw, ty),
         Literal::Float(raw) => raw
             .strip_suffix("f32")
             .or_else(|| raw.strip_suffix("f64"))
@@ -2034,10 +2033,45 @@ fn literal_c(literal: &Literal, _ty: Option<&Type>) -> String {
     }
 }
 
-fn integer_c(raw: &str) -> String {
-    parse_integer(raw)
-        .map(|(value, _)| value.to_string())
-        .expect("validated integer literal")
+fn integer_c(raw: &str, ty: Option<&Type>) -> String {
+    let (value, _) = parse_integer(raw).expect("validated integer literal");
+    let Some(Type::Int(kind)) = ty else {
+        return value.to_string();
+    };
+    let macro_name = if kind.is_unsigned() {
+        "UINT64_C"
+    } else {
+        "INT64_C"
+    };
+    format!("(({}){macro_name}({value}))", c_type(&Type::Int(*kind)))
+}
+
+fn signed_minimum_c(value: &Expr, ty: &Type) -> Option<String> {
+    let ExprKind::Literal(Literal::Int(raw)) = &value.kind else {
+        return None;
+    };
+    let Type::Int(kind) = ty else {
+        return None;
+    };
+    if kind.is_unsigned() {
+        return None;
+    }
+    let (magnitude, _) = parse_integer(raw).ok()?;
+    let (expected, constant) = match kind {
+        IntType::I8 => (i8::MAX as u128 + 1, "INT8_MIN"),
+        IntType::I16 => (i16::MAX as u128 + 1, "INT16_MIN"),
+        IntType::I32 => (i32::MAX as u128 + 1, "INT32_MIN"),
+        IntType::I64 => (i64::MAX as u128 + 1, "INT64_MIN"),
+        IntType::Isize => (isize::MAX as u128 + 1, "PTRDIFF_MIN"),
+        IntType::CChar => (std::ffi::c_char::MAX as u128 + 1, "CHAR_MIN"),
+        IntType::CSChar => (std::ffi::c_schar::MAX as u128 + 1, "SCHAR_MIN"),
+        IntType::CShort => (std::ffi::c_short::MAX as u128 + 1, "SHRT_MIN"),
+        IntType::CInt => (std::ffi::c_int::MAX as u128 + 1, "INT_MIN"),
+        IntType::CLong => (std::ffi::c_long::MAX as u128 + 1, "LONG_MIN"),
+        IntType::CLongLong => (std::ffi::c_longlong::MAX as u128 + 1, "LLONG_MIN"),
+        _ => return None,
+    };
+    (magnitude == expected).then(|| format!("(({}){constant})", c_type(ty)))
 }
 
 fn c_string(value: &str) -> String {
@@ -2115,7 +2149,7 @@ fn pattern_condition(pattern: &Pattern, value: &str, ty: &Type, model: &Semantic
             format!("({value}) == {value_literal}")
         }
         Pattern::Literal(Literal::Int(literal), _) => {
-            format!("({value}) == {}", integer_c(literal))
+            format!("({value}) == {}", integer_c(literal, Some(ty)))
         }
         Pattern::Path(path, _) | Pattern::Variant(path, _, _) => {
             let Some((enum_name, variant)) = split_variant(path) else {
@@ -2155,69 +2189,6 @@ fn enum_value(path: &[String], model: &SemanticModel) -> String {
             sanitize(variant)
         )
     }
-}
-
-fn find_error_type(block: &Block, analysis: &Analysis) -> Option<Type> {
-    fn expression_error(expression: &Expr, analysis: &Analysis) -> Option<Type> {
-        match &expression.kind {
-            ExprKind::Raise(value) => analysis.model.expression_types.get(&value.id).cloned(),
-            ExprKind::Propagate(value) => {
-                if let ExprKind::Call { callee, .. } = &value.kind {
-                    if let ExprKind::Path(path) = &callee.kind {
-                        return path
-                            .first()
-                            .and_then(|name| analysis.model.functions.get(name))
-                            .and_then(|info| info.error_type.clone());
-                    }
-                }
-                None
-            }
-            ExprKind::Block(block) => find_error_type(block, analysis),
-            ExprKind::If {
-                then_block,
-                else_expr,
-                ..
-            } => find_error_type(then_block, analysis).or_else(|| {
-                else_expr
-                    .as_deref()
-                    .and_then(|value| expression_error(value, analysis))
-            }),
-            ExprKind::Unary { value, .. } | ExprKind::Cast { value, .. } => {
-                expression_error(value, analysis)
-            }
-            ExprKind::Binary { left, right, .. } => {
-                expression_error(left, analysis).or_else(|| expression_error(right, analysis))
-            }
-            ExprKind::Call { callee, arguments } => {
-                expression_error(callee, analysis).or_else(|| {
-                    arguments
-                        .iter()
-                        .find_map(|argument| expression_error(argument, analysis))
-                })
-            }
-            ExprKind::TypeApply { .. } => None,
-            ExprKind::Field { base, .. } => expression_error(base, analysis),
-            ExprKind::StructLiteral { fields, .. } => fields
-                .iter()
-                .find_map(|field| expression_error(&field.value, analysis)),
-            _ => None,
-        }
-    }
-    for statement in &block.statements {
-        let result = match statement {
-            Stmt::Expr(expression) => expression_error(expression, analysis),
-            Stmt::Defer(block, _) => find_error_type(block, analysis),
-            Stmt::Let { value, .. } => expression_error(value, analysis),
-            Stmt::Const(_) => None,
-        };
-        if result.is_some() {
-            return result;
-        }
-    }
-    block
-        .tail
-        .as_deref()
-        .and_then(|expression| expression_error(expression, analysis))
 }
 
 fn split_variant(path: &[String]) -> Option<(&str, &str)> {
@@ -2474,14 +2445,14 @@ mod tests {
         let mut model = SemanticModel::default();
         model.enums.insert(
             "CFlag".to_owned(),
-            crate::sema::EnumInfo {
+            crate::semantics::EnumInfo {
                 variants: BTreeMap::from([("On".to_owned(), Vec::new())]),
                 repr_c: true,
             },
         );
         model.enums.insert(
             "Payload".to_owned(),
-            crate::sema::EnumInfo {
+            crate::semantics::EnumInfo {
                 variants: BTreeMap::from([("Some".to_owned(), vec![Type::Int(IntType::I32)])]),
                 repr_c: false,
             },
@@ -2571,14 +2542,14 @@ mod tests {
         let mut model = SemanticModel::default();
         model.structs.insert(
             "S".to_owned(),
-            crate::sema::StructInfo {
+            crate::semantics::StructInfo {
                 fields: BTreeMap::new(),
                 repr_c: false,
             },
         );
         model.enums.insert(
             "E".to_owned(),
-            crate::sema::EnumInfo {
+            crate::semantics::EnumInfo {
                 variants: BTreeMap::new(),
                 repr_c: false,
             },
@@ -2757,6 +2728,60 @@ fn exercise(pointer: *mut PublicPair, address: usize, flag: bool) -> i32 {
     }
 
     #[test]
+    fn lowers_nested_try_with_the_semantically_resolved_error_type() {
+        let analysis = analyze(
+            SourceFile::new(
+                "nested.altc",
+                r#"
+enum Failure { Failed, }
+fn fail() -> i32 with { raise[Failure] } { raise Failure::Failed; }
+@entry
+fn application_main() -> c_int {
+  try {
+    let mut attempts: i32 = 0;
+    while attempts < 1 {
+      attempts += 1;
+      fail()?;
+    };
+    2
+  } catch {
+    Failure::Failed => 0,
+  }
+}
+"#,
+            ),
+            &AnalyzeOptions::default(),
+        );
+        assert!(analysis.succeeded(), "{:?}", analysis.diagnostics);
+        assert_eq!(analysis.model.try_error_types.len(), 1);
+        let generated = emit_c(&analysis, &CodegenOptions::default()).unwrap();
+        assert!(generated.source.contains("altc_Failure altc_tmp_"));
+    }
+
+    #[test]
+    fn emits_strict_c_integer_constants_at_signed_and_unsigned_boundaries() {
+        let analysis = analyze(
+            SourceFile::new(
+                "boundaries.altc",
+                r#"
+const MAXIMUM: u64 = 18446744073709551615u64;
+const MINIMUM: i64 = -9223372036854775808i64;
+fn boundaries() -> bool {
+  let maximum: u64 = 18446744073709551615u64;
+  let minimum: i64 = -9223372036854775808i64;
+  maximum == MAXIMUM && minimum == MINIMUM
+}
+"#,
+            ),
+            &AnalyzeOptions::default(),
+        );
+        assert!(analysis.succeeded(), "{:?}", analysis.diagnostics);
+        let generated = emit_c(&analysis, &CodegenOptions::default()).unwrap();
+        assert!(generated.source.contains("UINT64_C(18446744073709551615)"));
+        assert_eq!(generated.source.matches("INT64_MIN").count(), 2);
+    }
+
+    #[test]
     fn exercises_defensive_function_lowering_and_recursive_ast_searches() {
         let mut analysis = analyze(
             SourceFile::new(
@@ -2778,14 +2803,6 @@ fn exercise(pointer: *mut PublicPair, address: usize, flag: bool) -> i32 {
         let raised_value = expression(2000, ExprKind::Path(vec!["error".to_owned()]));
         let raised = expression(2001, ExprKind::Raise(Box::new(raised_value.clone())));
         let raising_callee = expression(2002, ExprKind::Path(vec!["raising".to_owned()]));
-        let raising_call = expression(
-            2003,
-            ExprKind::Call {
-                callee: Box::new(raising_callee.clone()),
-                arguments: Vec::new(),
-            },
-        );
-        let propagate = expression(2004, ExprKind::Propagate(Box::new(raising_call.clone())));
 
         let block = |statements: Vec<Stmt>, tail: Option<Expr>| Block {
             statements,
@@ -2935,119 +2952,6 @@ fn exercise(pointer: *mut PublicPair, address: usize, flag: bool) -> i32 {
             }
         )));
         assert!(!expression_has_direct_break(&literal(23)));
-
-        for candidate in [raised.clone(), propagate.clone()] {
-            let found = find_error_type(&block(vec![Stmt::Expr(candidate)], None), &analysis);
-            assert_eq!(found, Some(Type::Enum("E".to_owned())));
-        }
-        assert_eq!(
-            find_error_type(
-                &block(
-                    vec![Stmt::Let {
-                        mutable: false,
-                        name: "value".to_owned(),
-                        ty: None,
-                        value: raised.clone(),
-                        span,
-                    }],
-                    None,
-                ),
-                &analysis,
-            ),
-            Some(Type::Enum("E".to_owned()))
-        );
-        let nested_error_cases = [
-            expression(
-                2010,
-                ExprKind::Block(block(Vec::new(), Some(raised.clone()))),
-            ),
-            expression(
-                2011,
-                ExprKind::If {
-                    condition: Box::new(literal(2012)),
-                    then_block: block(Vec::new(), None),
-                    else_expr: Some(Box::new(raised.clone())),
-                },
-            ),
-            expression(
-                2013,
-                ExprKind::Unary {
-                    operator: UnaryOp::Not,
-                    value: Box::new(raised.clone()),
-                },
-            ),
-            expression(
-                2014,
-                ExprKind::Cast {
-                    value: Box::new(raised.clone()),
-                    ty: TypeRef::Named {
-                        path: vec!["i32".to_owned()],
-                        span,
-                    },
-                },
-            ),
-            expression(
-                2015,
-                ExprKind::Binary {
-                    operator: BinaryOp::Add,
-                    left: Box::new(literal(2016)),
-                    right: Box::new(raised.clone()),
-                },
-            ),
-            expression(
-                2017,
-                ExprKind::Call {
-                    callee: Box::new(literal(2018)),
-                    arguments: vec![raised.clone()],
-                },
-            ),
-            expression(
-                2019,
-                ExprKind::Field {
-                    base: Box::new(raised.clone()),
-                    name: "field".to_owned(),
-                    pointer: false,
-                },
-            ),
-            expression(
-                2020,
-                ExprKind::StructLiteral {
-                    path: vec!["S".to_owned()],
-                    fields: vec![FieldInitializer {
-                        name: "field".to_owned(),
-                        value: raised.clone(),
-                        span,
-                    }],
-                },
-            ),
-        ];
-        for candidate in nested_error_cases {
-            assert_eq!(
-                find_error_type(&block(Vec::new(), Some(candidate)), &analysis),
-                Some(Type::Enum("E".to_owned()))
-            );
-        }
-        assert_eq!(
-            find_error_type(
-                &block(
-                    vec![
-                        Stmt::Const(ConstDecl {
-                            name: "IGNORED".to_owned(),
-                            ty: TypeRef::Named {
-                                path: vec!["i32".to_owned()],
-                                span,
-                            },
-                            value: literal(2021),
-                            span,
-                        }),
-                        Stmt::Defer(block(Vec::new(), Some(raised.clone())), span),
-                    ],
-                    None,
-                ),
-                &analysis,
-            ),
-            Some(Type::Enum("E".to_owned()))
-        );
 
         let info = analysis.model.functions["sample"].clone();
         let mut output = Writer::default();

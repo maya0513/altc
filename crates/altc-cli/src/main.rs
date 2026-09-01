@@ -104,9 +104,7 @@ fn run_cli(cli: &Cli) -> Result<u8, ()> {
                 let generated = generate(&analysis, input, cli)?;
                 let out_dir = default_build_dir(input);
                 let paths = write_generated(&generated, &out_dir, cli)?;
-                if let Some(ffi_path) = paths.ffi_check {
-                    run_ffi_check(cli, &ffi_path, &out_dir)?;
-                }
+                verify_generated_ffi(cli, &paths, &out_dir)?;
             }
             Ok(0)
         }
@@ -305,7 +303,6 @@ fn report_memory_summary(summary: &MemorySummary, source: &SourceFile, format: M
 
 struct GeneratedPaths {
     source: PathBuf,
-    public_header: Option<PathBuf>,
     ffi_check: Option<PathBuf>,
 }
 
@@ -370,11 +367,7 @@ fn write_generated(unit: &GeneratedUnit, out_dir: &Path, cli: &Cli) -> Result<Ge
             eprintln!("generated {}", path.display());
         }
     }
-    Ok(GeneratedPaths {
-        source,
-        public_header,
-        ffi_check,
-    })
+    Ok(GeneratedPaths { source, ffi_check })
 }
 
 fn build_artifact(
@@ -384,6 +377,25 @@ fn build_artifact(
     kind: ArtifactKind,
     cli: &Cli,
 ) -> Result<PathBuf, ()> {
+    validate_artifact_kind(analysis, kind, cli)?;
+    let generated = generate(analysis, input, cli)?;
+    let out_dir = default_build_dir(input);
+    let paths = write_generated(&generated, &out_dir, cli)?;
+    verify_generated_ffi(cli, &paths, &out_dir)?;
+    let object = compile_object(cli, &paths.source, &out_dir, &generated.unit_name)?;
+    let output = requested_output.map_or_else(
+        || default_artifact_path(&out_dir, &generated.unit_name, kind),
+        Path::to_path_buf,
+    );
+    ensure_output_parent(cli, &output)?;
+    match kind {
+        ArtifactKind::Exe => link_executable(cli, &object, &output)?,
+        ArtifactKind::Staticlib => archive_static_library(cli, &object, &output)?,
+    }
+    Ok(output)
+}
+
+fn validate_artifact_kind(analysis: &Analysis, kind: ArtifactKind, cli: &Cli) -> Result<(), ()> {
     match kind {
         ArtifactKind::Exe if analysis.entrypoint().is_none() => {
             tool_error(
@@ -405,24 +417,38 @@ fn build_artifact(
         }
         _ => {}
     }
-    let generated = generate(analysis, input, cli)?;
-    let out_dir = default_build_dir(input);
-    let paths = write_generated(&generated, &out_dir, cli)?;
+    Ok(())
+}
+
+fn verify_generated_ffi(cli: &Cli, paths: &GeneratedPaths, out_dir: &Path) -> Result<(), ()> {
     if let Some(ffi_path) = &paths.ffi_check {
-        run_ffi_check(cli, ffi_path, &out_dir)?;
+        run_ffi_check(cli, ffi_path, out_dir)?;
     }
-    let object = out_dir.join(format!("{}.o", generated.unit_name));
+    Ok(())
+}
+
+fn compile_object(
+    cli: &Cli,
+    source: &Path,
+    out_dir: &Path,
+    unit_name: &str,
+) -> Result<PathBuf, ()> {
+    let object = out_dir.join(format!("{unit_name}.o"));
     let mut compile = Command::new(&cli.cc);
-    add_c_compile_options(&mut compile, cli, &out_dir);
-    compile.arg("-c").arg(&paths.source).arg("-o").arg(&object);
+    add_c_compile_options(&mut compile, cli, out_dir);
+    compile.arg("-c").arg(source).arg("-o").arg(&object);
     run_tool(cli, "ALTC6004", "C compilation failed", &mut compile)?;
-    let output = requested_output.map_or_else(
-        || match kind {
-            ArtifactKind::Exe => out_dir.join(&generated.unit_name),
-            ArtifactKind::Staticlib => out_dir.join(format!("lib{}.a", generated.unit_name)),
-        },
-        Path::to_path_buf,
-    );
+    Ok(object)
+}
+
+fn default_artifact_path(out_dir: &Path, unit_name: &str, kind: ArtifactKind) -> PathBuf {
+    match kind {
+        ArtifactKind::Exe => out_dir.join(unit_name),
+        ArtifactKind::Staticlib => out_dir.join(format!("lib{unit_name}.a")),
+    }
+}
+
+fn ensure_output_parent(cli: &Cli, output: &Path) -> Result<(), ()> {
     if let Some(parent) = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -436,29 +462,28 @@ fn build_artifact(
             );
         })?;
     }
-    match kind {
-        ArtifactKind::Exe => {
-            let mut link = Command::new(&cli.cc);
-            link.arg(&object).arg("-o").arg(&output);
-            for path in &cli.library_path {
-                link.arg(format!("-L{}", path.display()));
-            }
-            for library in &cli.library {
-                let mut value = OsString::from("-l");
-                value.push(library);
-                link.arg(value);
-            }
-            link.args(&cli.ldflag);
-            run_tool(cli, "ALTC6006", "C linker failed", &mut link)?;
-        }
-        ArtifactKind::Staticlib => {
-            let mut archive = Command::new(&cli.ar);
-            archive.arg("rcs").arg(&output).arg(&object);
-            run_tool(cli, "ALTC6007", "archiver failed", &mut archive)?;
-        }
+    Ok(())
+}
+
+fn link_executable(cli: &Cli, object: &Path, output: &Path) -> Result<(), ()> {
+    let mut link = Command::new(&cli.cc);
+    link.arg(object).arg("-o").arg(output);
+    for path in &cli.library_path {
+        link.arg(format!("-L{}", path.display()));
     }
-    let _ = paths.public_header;
-    Ok(output)
+    for library in &cli.library {
+        let mut value = OsString::from("-l");
+        value.push(library);
+        link.arg(value);
+    }
+    link.args(&cli.ldflag);
+    run_tool(cli, "ALTC6006", "C linker failed", &mut link)
+}
+
+fn archive_static_library(cli: &Cli, object: &Path, output: &Path) -> Result<(), ()> {
+    let mut archive = Command::new(&cli.ar);
+    archive.arg("rcs").arg(output).arg(object);
+    run_tool(cli, "ALTC6007", "archiver failed", &mut archive)
 }
 
 fn run_ffi_check(cli: &Cli, ffi_path: &Path, out_dir: &Path) -> Result<(), ()> {
@@ -724,7 +749,7 @@ mod tests {
         let success = temporary("generated-success");
         let paths = write_generated(&unit, &success, &command_cli).unwrap();
         assert!(paths.source.is_file());
-        assert!(paths.public_header.unwrap().is_file());
+        assert!(success.join("sample.h").is_file());
         assert!(paths.ffi_check.unwrap().is_file());
 
         let create_failure = temporary("generated-create-failure");

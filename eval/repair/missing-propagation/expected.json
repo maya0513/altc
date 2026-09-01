@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3106",
+    "end": {
+      "column": 9,
+      "line": 10
+    },
+    "file": "eval/repair/missing-propagation/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 152,
+          "start": 146
+        }
+      }
+    ],
+    "message": "raising call to `fail` requires postfix `?`",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 152,
+      "start": 146
+    },
+    "start": {
+      "column": 3,
+      "line": 10
+    }
+  }
+]

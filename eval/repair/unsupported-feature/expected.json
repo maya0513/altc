@@ -1,0 +1,92 @@
+[
+  {
+    "code": "ALTC4001",
+    "end": {
+      "column": 15,
+      "line": 1
+    },
+    "file": "eval/repair/unsupported-feature/broken.altc",
+    "help": "use the single-file v0 language subset documented in docs/implementation-status.md",
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 14,
+          "start": 11
+        }
+      }
+    ],
+    "message": "generic functions are not implemented in executable v0",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 14,
+      "start": 11
+    },
+    "start": {
+      "column": 12,
+      "line": 1
+    }
+  },
+  {
+    "code": "ALTC3005",
+    "end": {
+      "column": 24,
+      "line": 1
+    },
+    "file": "eval/repair/unsupported-feature/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 23,
+          "start": 22
+        }
+      }
+    ],
+    "message": "unknown type `T`",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 23,
+      "start": 22
+    },
+    "start": {
+      "column": 23,
+      "line": 1
+    }
+  },
+  {
+    "code": "ALTC3005",
+    "end": {
+      "column": 30,
+      "line": 1
+    },
+    "file": "eval/repair/unsupported-feature/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 29,
+          "start": 28
+        }
+      }
+    ],
+    "message": "unknown type `T`",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 29,
+      "start": 28
+    },
+    "start": {
+      "column": 29,
+      "line": 1
+    }
+  }
+]

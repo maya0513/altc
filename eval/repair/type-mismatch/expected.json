@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3047",
+    "end": {
+      "column": 24,
+      "line": 2
+    },
+    "file": "eval/repair/type-mismatch/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 44,
+          "start": 43
+        }
+      }
+    ],
+    "message": "type mismatch: expected `bool`, found `i32`",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 44,
+      "start": 43
+    },
+    "start": {
+      "column": 23,
+      "line": 2
+    }
+  }
+]

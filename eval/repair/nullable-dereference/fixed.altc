@@ -1,0 +1,6 @@
+fn read(pointer: ?*const i32) -> i32 {
+  match pointer {
+    nonnull(value) => *value,
+    null => 0,
+  }
+}

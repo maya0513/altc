@@ -1,0 +1,33 @@
+struct Point {
+  x: i32,
+  y: i32,
+}
+
+enum MaybeInt {
+  Some(i32),
+  None,
+}
+
+fn sum_to(limit: i32) -> i32 {
+  let mut total: i32 = 0;
+  for (let mut index: i32 = 0; index < limit; index += 1) {
+    total += index;
+  };
+  total
+}
+
+fn unwrap(value: MaybeInt) -> i32 {
+  match value {
+    MaybeInt::Some(inner) => inner,
+    MaybeInt::None => 0,
+  }
+}
+
+@entry
+fn application_main() -> c_int {
+  let point = Point {
+    x: 2,
+    y: 3,
+  };
+  unwrap(MaybeInt::Some(point.x + sum_to(4))) as c_int
+}
