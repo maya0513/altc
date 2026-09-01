@@ -1,0 +1,17 @@
+extern "C" from <stdlib.h> {
+  fn malloc(size: usize) -> ?*mut unit with { alloc };
+  fn free(pointer: *mut unit) with { free };
+}
+
+@entry
+fn application_main() -> c_int with { alloc, free } {
+  let data: *mut u8 = match malloc(sizeof[u8]) {
+    nonnull(raw) => ptr_cast[u8](raw),
+    null => return 2,
+  };
+  defer {
+    free(ptr_cast[unit](data));
+  }
+  *data = 7u8;
+  *data as c_int
+}

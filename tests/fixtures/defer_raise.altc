@@ -1,0 +1,32 @@
+extern "C" from <stdio.h> {
+  fn puts(message: *const c_char) -> c_int;
+}
+
+enum Failure {
+  Failed,
+}
+
+fn fail() -> i32 with { raise[Failure] } {
+  raise Failure::Failed;
+}
+
+fn layered() -> i32 with { raise[Failure] } {
+  defer {
+    puts(c"outer");
+  }
+  {
+    defer {
+      puts(c"inner");
+    }
+    fail()?
+  }
+}
+
+@entry
+fn application_main() -> c_int {
+  try {
+    layered()? as c_int
+  } catch {
+    Failure::Failed => 0,
+  }
+}

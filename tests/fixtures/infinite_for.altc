@@ -1,0 +1,10 @@
+@entry
+fn application_main() -> c_int {
+  for (;;) {
+    break;
+  };
+  for (;;) {
+    return 0;
+  };
+  1
+}

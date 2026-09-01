@@ -1,0 +1,22 @@
+extern "C" from <stdio.h> {
+  fn puts(value: *const c_char) -> c_int;
+}
+
+@entry
+fn application_main() -> c_int {
+  let binary: u8 = 0b1010;
+  let octal: i32 = 0o755;
+  let hexadecimal: i32 = 0xff;
+  let minimum: i8 = -128i8;
+  let newline: char = '\n';
+  let lambda: char = '\u{03bb}';
+
+  if binary != 10u8 || octal != 493 || hexadecimal != 255 {
+    return 1;
+  };
+  if minimum != -128i8 || newline != '\x0a' || lambda != 'λ' {
+    return 2;
+  };
+  puts(c"line\n\u{03bb}");
+  0
+}

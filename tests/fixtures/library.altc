@@ -1,0 +1,12 @@
+@repr(C)
+enum ApiError {
+  Negative,
+}
+
+@c_name("checked_double")
+export "C" fn checked_double(value: i32) -> i32 with { raise[ApiError] } {
+  if value < 0 {
+    raise ApiError::Negative;
+  };
+  value * 2
+}

@@ -1,0 +1,9 @@
+extern "C" from "mismatch.h" {
+  fn mismatch(value: c_int) -> c_int;
+}
+
+@entry
+fn application_main() -> c_int {
+  0
+}
+

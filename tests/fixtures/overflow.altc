@@ -1,0 +1,26 @@
+@entry
+fn application_main() -> c_int {
+  let saturated_add: u8 = 250u8 +| 20u8;
+  let saturated_sub: u8 = 2u8 -| 5u8;
+  let saturated_mul: i8 = 100i8 *| 2i8;
+  let wrapped_add: u8 = 250u8 +% 10u8;
+  let mut assigned: u8 = 250u8;
+  assigned +|= 20u8;
+
+  if saturated_add != 255u8 {
+    return 1;
+  };
+  if saturated_sub != 0u8 {
+    return 2;
+  };
+  if saturated_mul != 127i8 {
+    return 3;
+  };
+  if wrapped_add != 4u8 {
+    return 4;
+  };
+  if assigned != 255u8 {
+    return 5;
+  };
+  0
+}

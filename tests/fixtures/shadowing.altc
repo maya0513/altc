@@ -1,0 +1,18 @@
+@entry
+fn application_main() -> c_int {
+  let value: i32 = 1;
+  let mut total: i32 = 0;
+
+  while true {
+    let value: i32 = 2;
+    total += value;
+    break;
+  };
+
+  for (let mut index: i32 = 0; index < 1; index += 1) {
+    let index: i32 = 10;
+    total += index;
+  };
+
+  (value + total) as c_int
+}

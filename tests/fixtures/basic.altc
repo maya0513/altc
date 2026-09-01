@@ -1,0 +1,17 @@
+const Limit: i32 = 100;
+
+fn clamp(value: i32) -> i32 {
+  if value < 0 {
+    0
+  } else if value > Limit {
+    Limit
+  } else {
+    value
+  }
+}
+
+@entry
+fn application_main() -> c_int {
+  clamp(75) as c_int
+}
+

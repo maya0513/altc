@@ -1,0 +1,22 @@
+extern "C" from <stdio.h> {
+  fn puts(message: *const c_char) -> c_int;
+}
+
+fn early() -> i32 {
+  defer {
+    puts(c"outer");
+  }
+  {
+    defer {
+      puts(c"inner");
+    }
+    return 3;
+  };
+  0
+}
+
+@entry
+fn application_main() -> c_int {
+  early() as c_int
+}
+
