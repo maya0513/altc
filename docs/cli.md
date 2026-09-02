@@ -11,10 +11,13 @@ altc build FILE [-o PATH] [--kind exe|staticlib]
 altc run FILE [-o PATH] -- [PROGRAM_ARGS...]
 ```
 
+- `FILE`はroot moduleです。親directoryからimport先を決定的に読み、graph全体を解析・生成する。
 - `check`は解析、名前・型・control・effect検査だけを行う。`--ffi`を付け、extern宣言がある場合だけC compilerでFFI contractを検証する。
 - `emit-c`は`UNIT.c`、必要なら`UNIT.h`と`UNIT_ffi_check.c`を出力する。既定directoryは`target/altc`。
 - `build --kind exe`は`@entry`を要求する。`build --kind staticlib`は`@entry`を拒否し、`libUNIT.a`を生成する。extern宣言があればbuild前のFFI検証は省略できない。
 - `run`はexecutableをbuildして起動し、`--`以降をそのまま渡す。processの終了codeをCLIの終了codeとして返す。
+
+module graphは常に単一C translation unitへ出力されるため、成果物数とdirectory規約はsingle-fileの場合と同じです。
 
 build途中のC source、header、object、FFI検証TUは`target/altc/UNIT/`に置かれます。
 

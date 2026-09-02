@@ -1,0 +1,49 @@
+import model;
+import processing;
+import bridge;
+import api;
+
+fn run_pipeline() -> i32 with { alloc, free } {
+  let mut readings: [model::Reading; 3usize] = [
+    model::Reading { value: 2, weight: 3, },
+    model::Reading { value: 4, weight: 2, },
+    model::Reading { value: 1, weight: 5, },
+  ];
+  readings[2usize].value = 2;
+  let view: []mut model::Reading = readings[..];
+
+  let temporary: *mut model::Reading = match processing::allocate_reading(3, 4) {
+    nonnull(value) => value,
+    null => return 2,
+  };
+  defer {
+    processing::cleanup_marker();
+    processing::release_reading(temporary);
+  }
+  defer {
+    temporary->value = 0;
+  }
+
+  let local: i32 = try {
+    processing::weighted_sum(slice_as_const(view))?
+  } catch {
+    model::PipelineError::Empty => return 3,
+    model::PipelineError::OutOfMemory => return 4,
+  };
+  let decision: model::Decision = if local > 0 {
+    model::Decision::Accepted(local)
+  } else {
+    model::Decision::Rejected(model::PipelineError::Empty)
+  };
+  let checked: i32 = match view.get(1usize) {
+    nonnull(reading) => reading->value,
+    null => 0,
+  };
+  let external: i32 = bridge::external_score(*temporary);
+  model::decision_value(decision) + checked + external
+}
+
+@entry
+fn application_main() -> c_int with { alloc, free } {
+  run_pipeline() as c_int
+}

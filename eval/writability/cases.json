@@ -41,6 +41,34 @@
       "task": "tasks/c-abi.md",
       "source": "golden/c-abi.altc",
       "expect_public_header": true
+    },
+    {
+      "id": "array-slice",
+      "task": "tasks/array-slice.md",
+      "source": "golden/array-slice.altc",
+      "expected_exit": 20
+    },
+    {
+      "id": "callback-layout",
+      "task": "tasks/callback-layout.md",
+      "source": "golden/callback-layout.altc",
+      "support": ["golden/eval_ffi.h"],
+      "expected_exit": 15,
+      "expected_memory": {
+        "function": "application_main",
+        "categories": ["global-read", "global-write", "extern-call"]
+      }
+    },
+    {
+      "id": "modules",
+      "task": "tasks/modules.md",
+      "source": "golden/modules.altc",
+      "modules": [
+        "golden/module_common.altc",
+        "golden/module_left.altc",
+        "golden/module_right.altc"
+      ],
+      "expected_exit": 9
     }
   ]
 }

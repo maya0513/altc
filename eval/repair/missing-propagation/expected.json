@@ -6,7 +6,7 @@
       "line": 10
     },
     "file": "eval/repair/missing-propagation/broken.altc",
-    "help": null,
+    "help": "append `?` to propagate the error, or handle it with `try ... catch`",
     "labels": [
       {
         "message": "",
@@ -14,6 +14,14 @@
         "span": {
           "end": 152,
           "start": 146
+        }
+      },
+      {
+        "message": "raising function declared here",
+        "primary": false,
+        "span": {
+          "end": 97,
+          "start": 28
         }
       }
     ],

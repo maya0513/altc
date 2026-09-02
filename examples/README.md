@@ -23,3 +23,7 @@ cargo run --quiet -p altc-cli -- check examples/feature_showcase.altc --ffi \
   --show-memory-summary
 cargo run --quiet -p altc-cli -- run examples/feature_showcase.altc --cflag=-Werror
 ```
+
+## telemetry pipeline
+
+[telemetry_pipeline](telemetry_pipeline/README.md)は、5つのaltc moduleと小さなC libraryからなる中規模統合projectです。array/slice、range-for、公開struct/enum、pointer/nullability、alloc/free、typed error、nested defer、extern global/layout/callback、import先のC exportを一つのCLI build/run経路で検査します。

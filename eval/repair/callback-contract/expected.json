@@ -1,0 +1,92 @@
+[
+  {
+    "code": "ALTC3214",
+    "end": {
+      "column": 62,
+      "line": 6
+    },
+    "file": "eval/repair/callback-contract/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 118,
+          "start": 79
+        }
+      }
+    ],
+    "message": "an `extern \"C\"` callback type cannot carry a `raise` effect",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 118,
+      "start": 79
+    },
+    "start": {
+      "column": 23,
+      "line": 6
+    }
+  },
+  {
+    "code": "ALTC3203",
+    "end": {
+      "column": 97,
+      "line": 6
+    },
+    "file": "eval/repair/callback-contract/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 153,
+          "start": 59
+        }
+      }
+    ],
+    "message": "parameter type `extern \"C\" fn() -> unit with { raise[Failure] }` of C function `atexit` is not C ABI-safe",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 153,
+      "start": 59
+    },
+    "start": {
+      "column": 3,
+      "line": 6
+    }
+  },
+  {
+    "code": "ALTC3205",
+    "end": {
+      "column": 97,
+      "line": 6
+    },
+    "file": "eval/repair/callback-contract/broken.altc",
+    "help": null,
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 153,
+          "start": 59
+        }
+      }
+    ],
+    "message": "raising extern functions are not implemented in executable v0",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 153,
+      "start": 59
+    },
+    "start": {
+      "column": 3,
+      "line": 6
+    }
+  }
+]

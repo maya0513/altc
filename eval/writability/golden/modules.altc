@@ -1,0 +1,7 @@
+import module_left;
+import module_right;
+
+@entry
+fn application_main() -> c_int {
+  module_left::value() + module_right::value()
+}

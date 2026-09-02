@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use altc_compiler::{AnalyzeOptions, CodegenOptions, GeneratedUnit, SourceFile, analyze, emit_c};
+use altc_compiler::{
+    Analysis, AnalyzeOptions, CodegenOptions, GeneratedUnit, ModuleLoadError, ModuleLoader,
+    ModulePath, SourceFile, analyze, analyze_project, emit_c,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -529,7 +532,17 @@ fn validate_generated(
     name: &str,
     warnings_as_errors: bool,
 ) -> Result<(), String> {
+    validate_generated_with_support(unit, name, warnings_as_errors, &[])
+}
+
+fn validate_generated_with_support(
+    unit: &GeneratedUnit,
+    name: &str,
+    warnings_as_errors: bool,
+    support: &[PathBuf],
+) -> Result<(), String> {
     let directory = TempDir::new(name)?;
+    copy_support_files(&directory.path, support)?;
     let source = write_generated(unit, &directory.path)?;
     let mut command = c_command();
     command
@@ -566,7 +579,16 @@ fn validate_generated(
 }
 
 fn compile_and_run(unit: &GeneratedUnit, name: &str) -> Result<Output, String> {
+    compile_and_run_with_support(unit, name, &[])
+}
+
+fn compile_and_run_with_support(
+    unit: &GeneratedUnit,
+    name: &str,
+    support: &[PathBuf],
+) -> Result<Output, String> {
     let directory = TempDir::new(name)?;
+    copy_support_files(&directory.path, support)?;
     let source = write_generated(unit, &directory.path)?;
     let executable = directory.path.join("program");
     let mut command = c_command();
@@ -584,6 +606,23 @@ fn compile_and_run(unit: &GeneratedUnit, name: &str) -> Result<Output, String> {
         .arg(&executable);
     check_tool_output(command_output(&mut command)?, "C build")?;
     command_output(Command::new(executable).current_dir(&directory.path))
+}
+
+fn copy_support_files(directory: &Path, support: &[PathBuf]) -> Result<(), String> {
+    for source in support {
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("support path `{}` has no file name", source.display()))?;
+        let destination = directory.join(name);
+        fs::copy(source, &destination).map_err(|error| {
+            format!(
+                "failed to copy support file `{}` to `{}`: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn write_generated(unit: &GeneratedUnit, directory: &Path) -> Result<PathBuf, String> {
@@ -740,6 +779,10 @@ struct WritabilityCase {
     #[serde(default)]
     expect_public_header: bool,
     expected_memory: Option<ExpectedMemory>,
+    #[serde(default)]
+    modules: Vec<String>,
+    #[serde(default)]
+    support: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -773,13 +816,21 @@ fn run_writability(root: &Path) -> Result<(), String> {
         require_file(&source_path)?;
         task_paths.insert(task);
         source_paths.insert(source_path.clone());
+        for module in &case.modules {
+            let module = base.join(module);
+            require_file(&module)?;
+            source_paths.insert(module);
+        }
+        let support = case
+            .support
+            .iter()
+            .map(|path| base.join(path))
+            .collect::<Vec<_>>();
+        for path in &support {
+            require_file(path)?;
+        }
 
-        let source = fs::read_to_string(&source_path)
-            .map_err(|error| format!("failed to read `{}`: {error}", source_path.display()))?;
-        let analysis = analyze(
-            SourceFile::new(case.source.clone(), source),
-            &AnalyzeOptions::default(),
-        );
+        let analysis = analyze_path(&source_path, case.source.clone())?;
         if !analysis.succeeded() {
             return Err(format!(
                 "writability case `{}` failed analysis:\n{}",
@@ -836,7 +887,8 @@ fn run_writability(root: &Path) -> Result<(), String> {
             ));
         }
         if let Some(expected_exit) = case.expected_exit {
-            let output = compile_and_run(&unit, &format!("eval-{}", case.id))?;
+            let output =
+                compile_and_run_with_support(&unit, &format!("eval-{}", case.id), &support)?;
             let actual_exit = output.status.code().unwrap_or(-1);
             let stdout = String::from_utf8_lossy(&output.stdout);
             if actual_exit != expected_exit || stdout != case.expected_stdout {
@@ -846,7 +898,7 @@ fn run_writability(root: &Path) -> Result<(), String> {
                 ));
             }
         } else {
-            validate_generated(&unit, &format!("eval-{}", case.id), true)?;
+            validate_generated_with_support(&unit, &format!("eval-{}", case.id), true, &support)?;
         }
     }
     check_manifest_inventory(&base.join("tasks"), "md", &task_paths)?;
@@ -895,12 +947,7 @@ fn run_repairs(root: &Path, update: bool) -> Result<(), String> {
         let snapshot_path = case.join("expected.json");
         require_file(&broken_path)?;
         require_file(&fixed_path)?;
-        let broken = fs::read_to_string(&broken_path)
-            .map_err(|error| format!("failed to read `{}`: {error}", broken_path.display()))?;
-        let analysis = analyze(
-            SourceFile::new(format!("eval/repair/{name}/broken.altc"), broken),
-            &AnalyzeOptions::default(),
-        );
+        let analysis = analyze_path(&broken_path, format!("eval/repair/{name}/broken.altc"))?;
         if analysis.succeeded() {
             return Err(format!(
                 "repair case `{name}` broken source unexpectedly succeeds"
@@ -915,12 +962,7 @@ fn run_repairs(root: &Path, update: bool) -> Result<(), String> {
             compare_diagnostic_snapshot(name, &expected, &actual)?;
         }
 
-        let fixed = fs::read_to_string(&fixed_path)
-            .map_err(|error| format!("failed to read `{}`: {error}", fixed_path.display()))?;
-        let analysis = analyze(
-            SourceFile::new(format!("eval/repair/{name}/fixed.altc"), fixed),
-            &AnalyzeOptions::default(),
-        );
+        let analysis = analyze_path(&fixed_path, format!("eval/repair/{name}/fixed.altc"))?;
         if !analysis.succeeded() {
             return Err(format!(
                 "repair case `{name}` fixed source fails:\n{}",
@@ -962,6 +1004,50 @@ fn require_file(path: &Path) -> Result<(), String> {
     }
 }
 
+struct DirectoryModuleLoader {
+    root: PathBuf,
+    display_root: PathBuf,
+}
+
+impl ModuleLoader for DirectoryModuleLoader {
+    fn load(&mut self, module: &ModulePath) -> Result<SourceFile, ModuleLoadError> {
+        let mut path = self.root.clone();
+        let mut display = self.display_root.clone();
+        for segment in module.segments() {
+            path.push(segment);
+            display.push(segment);
+        }
+        path.set_extension("altc");
+        display.set_extension("altc");
+        let bytes = fs::read(&path).map_err(|error| {
+            ModuleLoadError::new(format!("failed to read `{}`: {error}", path.display()))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ModuleLoadError::new(format!("`{}` is not valid UTF-8: {error}", path.display()))
+        })?;
+        Ok(SourceFile::new(display.display().to_string(), text))
+    }
+}
+
+fn analyze_path(path: &Path, display_name: String) -> Result<Analysis, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| format!("`{}` is not valid UTF-8: {error}", path.display()))?;
+    let mut loader = DirectoryModuleLoader {
+        root: path.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
+        display_root: Path::new(&display_name)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_owned(),
+    };
+    Ok(analyze_project(
+        SourceFile::new(display_name, text),
+        &mut loader,
+        &AnalyzeOptions::default(),
+    ))
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct PerfBaseline {
     tolerance_percent: u64,
@@ -983,6 +1069,7 @@ const PERF_CASES: &[(&str, &str)] = &[
     ("feature-showcase", "examples/feature_showcase.altc"),
     ("library", "tests/fixtures/library.altc"),
     ("overflow", "tests/fixtures/overflow.altc"),
+    ("telemetry-project", "examples/telemetry_pipeline/main.altc"),
 ];
 
 fn run_perf(mode: PerfMode) -> Result<(), String> {
@@ -1007,12 +1094,7 @@ fn collect_perf_metrics(root: &Path) -> Result<BTreeMap<String, PerfMetric>, Str
     let mut metrics = BTreeMap::new();
     for (id, input) in PERF_CASES {
         let path = root.join(input);
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-        let analysis = analyze(
-            SourceFile::new((*input).to_owned(), source),
-            &AnalyzeOptions::default(),
-        );
+        let analysis = analyze_path(&path, (*input).to_owned())?;
         if !analysis.succeeded() {
             return Err(format!(
                 "performance case `{id}` failed analysis:\n{}",

@@ -6,7 +6,7 @@
       "line": 4
     },
     "file": "eval/repair/entry-contract/broken.altc",
-    "help": null,
+    "help": "declare it as `@entry fn name() -> c_int` and handle typed errors inside the function",
     "labels": [
       {
         "message": "",

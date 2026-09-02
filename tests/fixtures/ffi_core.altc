@@ -1,0 +1,39 @@
+extern "C" from "ffi_core.h" {
+  @c_typedef("telemetry_point_t")
+  struct Point {
+    @c_name("value") value: c_int,
+    @c_name("scale") scale: c_int,
+  }
+
+  @c_name("telemetry_state")
+  enum State {
+    @c_name("TELEMETRY_OK") Ok,
+    @c_name("TELEMETRY_FAILED") Failed,
+  }
+
+  @c_name("telemetry_counter") var counter: c_int;
+  @c_name("telemetry_limit") const limit: c_int;
+
+  @c_name("telemetry_apply")
+  fn apply(callback: extern "C" fn(c_int) -> c_int, value: c_int) -> c_int;
+}
+
+fn double(value: c_int) -> c_int {
+  value * 2
+}
+
+fn indirect(callback: fn(c_int) -> c_int, value: c_int) -> c_int {
+  callback(value)
+}
+
+@entry
+fn application_main() -> c_int {
+  counter += 1;
+  let point = Point { value: 3, scale: 1, };
+  let state: State = State::Ok;
+  let state_value: c_int = match state {
+    State::Ok => 1,
+    State::Failed => 0,
+  };
+  apply(double, point.value) + limit + counter + state_value + indirect(double, 1)
+}

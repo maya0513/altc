@@ -6,7 +6,7 @@
       "line": 2
     },
     "file": "eval/repair/pointer-builtin-type-arguments/broken.altc",
-    "help": null,
+    "help": "call it as `ptr_addr(pointer)` without `[Type]`",
     "labels": [
       {
         "message": "",

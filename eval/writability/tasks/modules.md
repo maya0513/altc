@@ -1,0 +1,3 @@
+# module・qualified access
+
+root fileから2つのmoduleをimportし、一方がさらに共通moduleをimportするdiamond graphを作る。公開宣言だけをqualified pathで参照し、graph全体を決定的な単一C translation unitへ生成して終了code 9を返す。

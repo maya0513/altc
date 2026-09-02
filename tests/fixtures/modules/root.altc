@@ -1,0 +1,7 @@
+import left;
+import right;
+
+@entry
+fn application_main() -> c_int {
+  left::value() + right::value()
+}

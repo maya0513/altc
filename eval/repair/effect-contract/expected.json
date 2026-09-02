@@ -6,7 +6,7 @@
       "line": 7
     },
     "file": "eval/repair/effect-contract/broken.altc",
-    "help": null,
+    "help": "add `alloc` to this function's `with { ... }` contract",
     "labels": [
       {
         "message": "",

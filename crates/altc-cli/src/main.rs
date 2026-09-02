@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 
 use altc_compiler::{
-    Analysis, AnalyzeOptions, CodegenOptions, Diagnostic, GeneratedUnit, MemorySummary, Severity,
-    SourceFile, analyze, emit_c,
+    Analysis, AnalyzeOptions, CodegenOptions, Diagnostic, GeneratedUnit, MemorySummary,
+    ModuleLoadError, ModuleLoader, ModulePath, Severity, SourceFile, analyze_project, emit_c,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
+
+#[cfg(test)]
+use altc_compiler::analyze;
 
 #[derive(Parser, Debug)]
 #[command(name = "altc", version, about = "The altc compiler and C11 driver")]
@@ -177,10 +180,37 @@ fn load_and_analyze(path: &Path, cli: &Cli) -> Result<Analysis, ()> {
             None,
         );
     })?;
-    Ok(analyze(
+    let root = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut loader = FilesystemModuleLoader { root };
+    Ok(analyze_project(
         SourceFile::new(path.display().to_string(), text),
+        &mut loader,
         &AnalyzeOptions::default(),
     ))
+}
+
+struct FilesystemModuleLoader {
+    root: PathBuf,
+}
+
+impl ModuleLoader for FilesystemModuleLoader {
+    fn load(&mut self, module: &ModulePath) -> Result<SourceFile, ModuleLoadError> {
+        let mut path = self.root.clone();
+        for segment in module.segments() {
+            path.push(segment);
+        }
+        path.set_extension("altc");
+        let bytes = fs::read(&path).map_err(|error| {
+            ModuleLoadError::new(format!("failed to read `{}`: {error}", path.display()))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ModuleLoadError::new(format!("`{}` is not valid UTF-8: {error}", path.display()))
+        })?;
+        Ok(SourceFile::new(path.display().to_string(), text))
+    }
 }
 
 fn checked_analysis(path: &Path, cli: &Cli) -> Result<Analysis, ()> {
@@ -201,11 +231,16 @@ fn generate(analysis: &Analysis, input: &Path, cli: &Cli) -> Result<GeneratedUni
 }
 
 fn report_analysis(analysis: &Analysis, cli: &Cli) {
-    report_diagnostics(
-        &analysis.diagnostics,
-        &analysis.source.text,
-        cli.message_format,
-    );
+    for diagnostic in &analysis.diagnostics {
+        let source = analysis
+            .modules()
+            .iter()
+            .find(|module| module.source.path == diagnostic.file)
+            .map_or(analysis.source.text.as_str(), |module| {
+                module.source.text.as_str()
+            });
+        report_diagnostics(std::slice::from_ref(diagnostic), source, cli.message_format);
+    }
     if cli.show_memory_summary && analysis.succeeded() {
         for summary in &analysis.memory_summaries {
             report_memory_summary(summary, &analysis.source, cli.message_format);
@@ -293,8 +328,8 @@ fn report_memory_summary(summary: &MemorySummary, source: &SourceFile, format: M
             );
             for via in &summary.transitive {
                 eprintln!(
-                    "  {:?} via {} at bytes {}..{}",
-                    via.category, via.callee, via.call_span.start, via.call_span.end
+                    "  {:?} via {} at {} bytes {}..{}",
+                    via.category, via.callee, via.file, via.call_span.start, via.call_span.end
                 );
             }
         }
@@ -920,6 +955,71 @@ mod tests {
             let _ = fs::remove_dir_all(parent);
         }
         let _ = fs::remove_file(bad_parent);
+    }
+
+    #[test]
+    fn filesystem_loader_reports_missing_and_non_utf8_modules() {
+        let directory = temporary("module-loader");
+        fs::create_dir_all(&directory).unwrap();
+        let root = directory.join("root.altc");
+        fs::write(&root, "import missing;").unwrap();
+        let command_cli = cli(Commands::Check {
+            input: root.clone(),
+            ffi: false,
+        });
+        let missing = load_and_analyze(&root, &command_cli).unwrap();
+        assert!(
+            missing
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ALTC3401")
+        );
+
+        fs::write(&root, "import invalid;").unwrap();
+        fs::write(directory.join("invalid.altc"), [0xff, 0xfe]).unwrap();
+        let invalid = load_and_analyze(&root, &command_cli).unwrap();
+        assert!(
+            invalid
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ALTC3401")
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_reports_missing_and_non_executable_compiler_outputs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary("run-invalid-output");
+        fs::create_dir_all(&directory).unwrap();
+        let compiler = directory.join("fake-cc");
+        fs::write(&compiler, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&compiler, fs::Permissions::from_mode(0o755)).unwrap();
+        let missing_output = directory.join("missing-program");
+        let mut missing = cli(Commands::Run {
+            input: fixture("basic.altc"),
+            output: Some(missing_output),
+            arguments: Vec::new(),
+        });
+        missing.cc = compiler.as_os_str().to_owned();
+        assert!(run_cli(&missing).is_err());
+
+        fs::write(
+            &compiler,
+            "#!/bin/sh\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = -o ]; then mkdir -p \"$argument\"; fi\n  previous=$argument\ndone\nexit 0\n",
+        )
+        .unwrap();
+        let directory_output = directory.join("directory-program");
+        let mut not_executable = cli(Commands::Run {
+            input: fixture("basic.altc"),
+            output: Some(directory_output),
+            arguments: Vec::new(),
+        });
+        not_executable.cc = compiler.as_os_str().to_owned();
+        assert!(run_cli(&not_executable).is_err());
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

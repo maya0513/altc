@@ -1,0 +1,26 @@
+@repr(C)
+pub struct Reading {
+  pub value: i32,
+  pub weight: i32,
+}
+
+@repr(C)
+pub enum PipelineError {
+  pub Empty,
+  pub OutOfMemory,
+}
+
+pub enum Decision {
+  pub Accepted(i32),
+  pub Rejected(PipelineError),
+}
+
+pub fn decision_value(decision: Decision) -> i32 {
+  match decision {
+    Decision::Accepted(value) => value,
+    Decision::Rejected(error) => match error {
+      PipelineError::Empty => -1,
+      PipelineError::OutOfMemory => -2,
+    },
+  }
+}

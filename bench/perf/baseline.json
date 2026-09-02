@@ -13,16 +13,16 @@
       "source_bytes": 2800
     },
     "effects": {
-      "ffi_bytes": 257,
+      "ffi_bytes": 258,
       "header_bytes": 0,
       "input": "tests/fixtures/effects.altc",
       "source_bytes": 2629
     },
     "feature-showcase": {
-      "ffi_bytes": 912,
+      "ffi_bytes": 913,
       "header_bytes": 661,
       "input": "examples/feature_showcase.altc",
-      "source_bytes": 22948
+      "source_bytes": 22947
     },
     "library": {
       "ffi_bytes": 0,
@@ -35,6 +35,12 @@
       "header_bytes": 0,
       "input": "tests/fixtures/overflow.altc",
       "source_bytes": 3257
+    },
+    "telemetry-project": {
+      "ffi_bytes": 2565,
+      "header_bytes": 611,
+      "input": "examples/telemetry_pipeline/main.altc",
+      "source_bytes": 15501
     }
   },
   "tolerance_percent": 2

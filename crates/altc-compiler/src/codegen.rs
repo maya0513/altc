@@ -4,7 +4,16 @@ use crate::Analysis;
 use crate::ast::*;
 use crate::diagnostic::{Diagnostic, Span, position};
 use crate::literal::{decode_quoted, parse_integer};
-use crate::semantics::{FloatType, FunctionInfo, IntType, SemanticModel, Type};
+use crate::semantics::{FunctionInfo, IntType, SemanticModel, Type};
+
+mod types;
+mod writer;
+
+use types::{
+    array_type_name, c_type, const_name, function_pointer_type_name, local_name, sanitize,
+    slice_data_pointer_type, slice_type_name, tag_name, type_name,
+};
+use writer::Writer;
 
 #[derive(Clone, Debug)]
 pub struct CodegenOptions {
@@ -25,6 +34,11 @@ pub struct GeneratedUnit {
     pub source: String,
     pub public_header: Option<String>,
     pub ffi_check: Option<String>,
+}
+
+enum EitherTypeDeclaration {
+    Struct(StructDecl),
+    Enum(EnumDecl),
 }
 
 /// Generate a self-contained C11 translation unit and its auxiliary headers.
@@ -63,6 +77,8 @@ struct Generator<'a> {
     options: &'a CodegenOptions,
     output: Writer,
     diagnostics: Vec<Diagnostic>,
+    emitted_named_types: BTreeSet<String>,
+    emitted_backend_types: BTreeSet<String>,
 }
 
 impl<'a> Generator<'a> {
@@ -72,6 +88,8 @@ impl<'a> Generator<'a> {
             options,
             output: Writer::default(),
             diagnostics: Vec::new(),
+            emitted_named_types: BTreeSet::new(),
+            emitted_backend_types: BTreeSet::new(),
         }
     }
 
@@ -101,6 +119,80 @@ impl<'a> Generator<'a> {
         self.emit_function_prototypes();
         self.emit_function_bodies();
         self.emit_entry_wrapper();
+    }
+
+    fn emit_backend_type(&mut self, ty: &Type) {
+        match ty {
+            Type::Array { element, length } => {
+                self.emit_type_dependency(element);
+                let name = array_type_name(element, *length);
+                if self.emitted_backend_types.insert(name.clone()) {
+                    self.output.open(&format!("typedef struct {} {{", name));
+                    self.output
+                        .line(&format!("{} data[{length}];", c_type(element)));
+                    self.output.close(&format!("}} {name};"));
+                }
+            }
+            Type::Slice { mutable, element } => {
+                self.emit_backend_type(element);
+                let name = slice_type_name(*mutable, element);
+                if self.emitted_backend_types.insert(name.clone()) {
+                    self.output.open(&format!("typedef struct {} {{", name));
+                    self.output.line(&format!(
+                        "{} data;",
+                        slice_data_pointer_type(*mutable, element)
+                    ));
+                    self.output.line("size_t len;");
+                    self.output.close(&format!("}} {name};"));
+                }
+            }
+            Type::FunctionPointer {
+                parameters,
+                return_type,
+                error_type,
+                ..
+            } => {
+                for parameter in parameters {
+                    self.emit_backend_type(parameter);
+                }
+                self.emit_backend_type(return_type);
+                if let Some(error_type) = error_type {
+                    self.emit_backend_type(error_type);
+                }
+                let name = function_pointer_type_name(ty);
+                if self.emitted_backend_types.insert(name.clone()) {
+                    let mut parameters = parameters.iter().map(c_type).collect::<Vec<_>>();
+                    let return_type = if let Some(error_type) = error_type {
+                        if **return_type != Type::Unit {
+                            parameters.push(format!("{} *", c_type(return_type)));
+                        }
+                        parameters.push(format!("{} *", c_type(error_type)));
+                        "int32_t".to_owned()
+                    } else {
+                        c_type(return_type)
+                    };
+                    self.output.line(&format!(
+                        "typedef {return_type} (*{})({});",
+                        name,
+                        if parameters.is_empty() {
+                            "void".to_owned()
+                        } else {
+                            parameters.join(", ")
+                        }
+                    ));
+                }
+            }
+            Type::Pointer { pointee, .. } => self.emit_backend_type(pointee),
+            _ => {}
+        }
+    }
+
+    fn emit_type_dependency(&mut self, ty: &Type) {
+        match ty {
+            Type::Struct(name) | Type::Enum(name) => self.emit_named_type(name),
+            Type::Array { .. } => self.emit_backend_type(ty),
+            _ => self.emit_backend_type(ty),
+        }
     }
 
     fn emit_saturating_helpers(&mut self) {
@@ -203,6 +295,30 @@ impl<'a> Generator<'a> {
 
     fn emit_type_declarations(&mut self) {
         for item in &self.analysis.program.items {
+            if let Item::Extern(block) = item {
+                for declaration in &block.structs {
+                    let info = &self.analysis.model.structs[&declaration.name];
+                    debug_assert!(info.is_extern);
+                    self.output.line(&format!(
+                        "typedef {}{} {};",
+                        if info.c_typedef { "" } else { "struct " },
+                        info.c_name,
+                        type_name(&declaration.name)
+                    ));
+                }
+                for declaration in &block.enums {
+                    let info = &self.analysis.model.enums[&declaration.name];
+                    debug_assert!(info.is_extern);
+                    self.output.line(&format!(
+                        "typedef {}{} {};",
+                        if info.c_typedef { "" } else { "enum " },
+                        info.c_name,
+                        type_name(&declaration.name)
+                    ));
+                }
+            }
+        }
+        for item in &self.analysis.program.items {
             match item {
                 Item::Struct(declaration) => {
                     self.output.line(&format!(
@@ -231,11 +347,91 @@ impl<'a> Generator<'a> {
             self.output.line("");
         }
 
-        for item in &self.analysis.program.items {
-            match item {
-                Item::Struct(declaration) => self.emit_struct(declaration),
-                Item::Enum(declaration) => self.emit_enum(declaration),
-                _ => {}
+        let names = self
+            .analysis
+            .program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(declaration) => Some(declaration.name.clone()),
+                Item::Enum(declaration) => Some(declaration.name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for name in names {
+            self.emit_named_type(&name);
+        }
+        let types = self
+            .analysis
+            .model
+            .type_references
+            .values()
+            .chain(self.analysis.model.expression_types.values())
+            .chain(self.analysis.model.const_types.values())
+            .chain(self.analysis.model.functions.values().flat_map(|function| {
+                function
+                    .parameters
+                    .iter()
+                    .chain(std::iter::once(&function.return_type))
+                    .chain(function.error_type.iter())
+            }))
+            .cloned()
+            .collect::<Vec<_>>();
+        for ty in types {
+            self.emit_backend_type(&ty);
+        }
+        if !self.emitted_backend_types.is_empty() {
+            self.output.line("");
+        }
+    }
+
+    fn emit_named_type(&mut self, name: &str) {
+        if self.emitted_named_types.contains(name) {
+            return;
+        }
+        let declaration = self
+            .analysis
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(declaration) if declaration.name == name => {
+                    Some(EitherTypeDeclaration::Struct(declaration.clone()))
+                }
+                Item::Enum(declaration) if declaration.name == name => {
+                    Some(EitherTypeDeclaration::Enum(declaration.clone()))
+                }
+                _ => None,
+            });
+        let Some(declaration) = declaration else {
+            return;
+        };
+        if !self.emitted_named_types.insert(name.to_owned()) {
+            return;
+        }
+        match declaration {
+            EitherTypeDeclaration::Struct(declaration) => {
+                let fields = self.analysis.model.structs[name]
+                    .fields
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for field in fields {
+                    self.emit_type_dependency(&field);
+                }
+                self.emit_struct(&declaration);
+            }
+            EitherTypeDeclaration::Enum(declaration) => {
+                let payload = self.analysis.model.enums[name]
+                    .variants
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for ty in payload {
+                    self.emit_type_dependency(&ty);
+                }
+                self.emit_enum(&declaration);
             }
         }
     }
@@ -351,10 +547,11 @@ impl<'a> Generator<'a> {
                 };
                 let info = self.analysis.model.functions[&function.name].clone();
                 let mut output = std::mem::take(&mut self.output);
-                let source_line = position(&self.analysis.source.text, function.span.start).line;
+                let (function_source, function_span) = self.analysis.source_for_span(function.span);
+                let source_line = position(&function_source.text, function_span.start).line;
                 output.line(&format!(
                     "#line {source_line} {}",
-                    c_string(&self.analysis.source.path)
+                    c_string(&function_source.path)
                 ));
                 output.open(&format!("{} {{", function_signature(&info, function)));
                 let mut function_generator =
@@ -483,6 +680,67 @@ impl<'a> Generator<'a> {
             output.line(&format!("#include {}", block.header));
         }
         output.line("");
+        for block in &blocks {
+            for declaration in &block.structs {
+                let info = &self.analysis.model.structs[&declaration.name];
+                output.line(&format!(
+                    "typedef {}{} {};",
+                    if info.c_typedef { "" } else { "struct " },
+                    info.c_name,
+                    type_name(&declaration.name)
+                ));
+            }
+            for declaration in &block.enums {
+                let info = &self.analysis.model.enums[&declaration.name];
+                output.line(&format!(
+                    "typedef {}{} {};",
+                    if info.c_typedef { "" } else { "enum " },
+                    info.c_name,
+                    type_name(&declaration.name)
+                ));
+            }
+        }
+        let mut backend_types = Vec::new();
+        let mut seen = BTreeSet::new();
+        for function in self.analysis.model.functions.values() {
+            for ty in function
+                .parameters
+                .iter()
+                .chain(std::iter::once(&function.return_type))
+            {
+                collect_sequence_types(ty, &mut seen, &mut backend_types);
+            }
+        }
+        for ty in backend_types {
+            if let Type::FunctionPointer {
+                parameters,
+                return_type,
+                error_type,
+                ..
+            } = &ty
+            {
+                let mut parameters = parameters.iter().map(c_type).collect::<Vec<_>>();
+                let return_type = if let Some(error_type) = error_type {
+                    if **return_type != Type::Unit {
+                        parameters.push(format!("{} *", c_type(return_type)));
+                    }
+                    parameters.push(format!("{} *", c_type(error_type)));
+                    "int32_t".to_owned()
+                } else {
+                    c_type(return_type)
+                };
+                output.line(&format!(
+                    "typedef {return_type} (*{})({});",
+                    function_pointer_type_name(&ty),
+                    if parameters.is_empty() {
+                        "void".to_owned()
+                    } else {
+                        parameters.join(", ")
+                    }
+                ));
+            }
+        }
+        output.line("");
         let mut index = 0usize;
         for block in blocks {
             for function in &block.functions {
@@ -513,6 +771,65 @@ impl<'a> Generator<'a> {
                 output.line(&format!(
                     "_Static_assert(sizeof({spelling} *) == sizeof(void *), \"altc FFI opaque type missing: {spelling}\");"
                 ));
+            }
+            for global in &block.globals {
+                let info = &self.analysis.model.globals[&global.name];
+                output.line(&format!(
+                    "_Static_assert(_Generic(&{}, {}{} *: 1, default: 0), \"altc FFI object mismatch: {}\");",
+                    info.c_name,
+                    if info.mutable { "" } else { "const " },
+                    c_type(&info.ty),
+                    info.c_name
+                ));
+            }
+            for declaration in &block.structs {
+                let info = &self.analysis.model.structs[&declaration.name];
+                let actual = type_name(&declaration.name);
+                let expected = format!("altc_expected_layout_{index}");
+                output.open(&format!("typedef struct {expected} {{"));
+                for field in &declaration.fields {
+                    let ty = &info.fields[&field.name];
+                    output.line(&format!("{} {};", c_type(ty), local_name(&field.name)));
+                }
+                output.close(&format!("}} {expected};"));
+                output.line(&format!(
+                    "_Static_assert(sizeof({actual}) == sizeof({expected}), \"altc FFI struct size mismatch: {}\");",
+                    info.c_name
+                ));
+                output.line(&format!(
+                    "_Static_assert(_Alignof({actual}) == _Alignof({expected}), \"altc FFI struct alignment mismatch: {}\");",
+                    info.c_name
+                ));
+                for field in &declaration.fields {
+                    let c_field = &info.field_c_names[&field.name];
+                    let expected_field = local_name(&field.name);
+                    let ty = &info.fields[&field.name];
+                    output.line(&format!(
+                        "_Static_assert(offsetof({actual}, {c_field}) == offsetof({expected}, {expected_field}), \"altc FFI field offset mismatch: {}.{c_field}\");",
+                        info.c_name
+                    ));
+                    output.line(&format!(
+                        "_Static_assert(_Generic(&((({actual} *)0)->{c_field}), {} *: 1, default: 0), \"altc FFI field type mismatch: {}.{c_field}\");",
+                        c_type(ty), info.c_name
+                    ));
+                }
+                index += 1;
+            }
+            for declaration in &block.enums {
+                let info = &self.analysis.model.enums[&declaration.name];
+                let actual = type_name(&declaration.name);
+                output.line(&format!(
+                    "_Static_assert(sizeof({actual}) > 0, \"altc FFI enum type mismatch: {}\");",
+                    info.c_name
+                ));
+                for variant in &declaration.variants {
+                    output.line(&format!(
+                        "_Static_assert(((int){}) == ((int){}), \"altc FFI enum spelling mismatch: {}\");",
+                        info.variant_c_names[&variant.name],
+                        info.variant_c_names[&variant.name],
+                        info.variant_c_names[&variant.name]
+                    ));
+                }
             }
         }
         Some(output.finish())
@@ -740,6 +1057,15 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
                 );
                 String::new()
             }
+            ExprKind::RangeFor {
+                binding,
+                sequence,
+                body,
+                ..
+            } => {
+                self.emit_range_for(binding, sequence, body);
+                String::new()
+            }
             ExprKind::Call { callee, arguments } => {
                 self.emit_call(callee, arguments, false, expression)
             }
@@ -751,13 +1077,25 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
                 name,
                 pointer,
             } => {
-                let base = self.emit_place(base);
+                let base_type = self.expression_type(base);
+                if name == "len" {
+                    return match base_type {
+                        Type::Array { length, .. } => format!("((size_t){length})"),
+                        Type::Slice { .. } => format!("({}).len", self.emit_value(base)),
+                        _ => "0".to_owned(),
+                    };
+                }
                 let field = if name == "byte_len" {
                     "byte_len".to_owned()
                 } else {
-                    local_name(name)
+                    self.field_c_name(base, name)
                 };
+                let base = self.emit_place(base);
                 format!("({base}){}{field}", if *pointer { "->" } else { "." })
+            }
+            ExprKind::Index { base, index } => self.emit_index(base, index),
+            ExprKind::Slice { base, start, end } => {
+                self.emit_slice(base, start.as_deref(), end.as_deref(), expression)
             }
             ExprKind::Propagate(value) => {
                 if let ExprKind::Call { callee, arguments } = &value.kind {
@@ -806,6 +1144,7 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             ExprKind::StructLiteral { path, fields } => {
                 self.emit_struct_literal(path, fields, expression)
             }
+            ExprKind::ArrayLiteral(values) => self.emit_array_literal(values, expression),
             ExprKind::Raise(value) => {
                 self.emit_raise(value);
                 "0".to_owned()
@@ -831,6 +1170,12 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             if self.analysis.model.const_types.contains_key(&path[0]) {
                 return const_name(&path[0]);
             }
+            if let Some(global) = self.analysis.model.globals.get(&path[0]) {
+                return global.c_name.clone();
+            }
+            if let Some(function) = self.analysis.model.functions.get(&path[0]) {
+                return format!("(&{})", function_c_name(function));
+            }
             return local_name(&path[0]);
         }
         enum_value(path, &self.analysis.model)
@@ -843,6 +1188,19 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
         propagate: bool,
         result_expression: &Expr,
     ) -> String {
+        if let ExprKind::Field {
+            base,
+            name,
+            pointer: false,
+        } = &callee.kind
+        {
+            if name == "get" {
+                return self.emit_get(base, arguments, result_expression);
+            }
+        }
+        if matches!(self.expression_type(callee), Type::FunctionPointer { .. }) {
+            return self.emit_indirect_call(callee, arguments, propagate);
+        }
         let (path, type_arguments): (&[String], &[TypeRef]) = match &callee.kind {
             ExprKind::Path(path) => (path, &[]),
             ExprKind::TypeApply { path, arguments } => (path, arguments),
@@ -852,6 +1210,12 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             return self.emit_variant_constructor(path, arguments, result_expression);
         }
         let name = &path[0];
+        if matches!(
+            name.as_str(),
+            "slice_from_parts" | "empty_slice" | "empty_slice_mut" | "slice_as_const"
+        ) {
+            return self.emit_slice_builtin(name, arguments, result_expression);
+        }
         if matches!(
             name.as_str(),
             "ptr_as_const"
@@ -884,6 +1248,192 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             String::new()
         } else {
             self.materialize(&info.return_type, call)
+        }
+    }
+
+    fn emit_indirect_call(&mut self, callee: &Expr, arguments: &[Expr], propagate: bool) -> String {
+        let Type::FunctionPointer {
+            parameters,
+            return_type,
+            error_type,
+            ..
+        } = self.expression_type(callee)
+        else {
+            return "0".to_owned();
+        };
+        let emitted = self.emit_value(callee);
+        let callee = self.materialize(&self.expression_type(callee), emitted);
+        let mut values = Vec::new();
+        for (argument, parameter_type) in arguments.iter().zip(&parameters) {
+            let emitted = self.emit_value(argument);
+            values.push(self.materialize(parameter_type, emitted));
+        }
+        if let Some(error_type) = error_type {
+            if !propagate {
+                return "0".to_owned();
+            }
+            let result = (*return_type != Type::Unit).then(|| self.new_temporary());
+            if let Some(result) = &result {
+                self.output
+                    .line(&format!("{} {result};", c_type(&return_type)));
+                values.push(format!("&{result}"));
+            }
+            let error = self.new_temporary();
+            self.output
+                .line(&format!("{} {error};", c_type(&error_type)));
+            values.push(format!("&{error}"));
+            let status = self.new_temporary();
+            self.output.line(&format!(
+                "int32_t {status} = {callee}({});",
+                values.join(", ")
+            ));
+            self.output.open(&format!("if ({status} != INT32_C(0)) {{"));
+            self.propagate_error(&error);
+            self.output.close("}");
+            result.unwrap_or_default()
+        } else {
+            let call = format!("{callee}({})", values.join(", "));
+            if *return_type == Type::Unit {
+                self.output.line(&format!("{call};"));
+                String::new()
+            } else {
+                self.materialize(&return_type, call)
+            }
+        }
+    }
+
+    fn emit_array_literal(&mut self, values: &[Expr], expression: &Expr) -> String {
+        let ty = self.expression_type(expression);
+        let temporary = self.new_temporary();
+        self.output.line(&format!("{} {temporary};", c_type(&ty)));
+        for (index, value) in values.iter().enumerate() {
+            let value_type = self.expression_type(value);
+            let emitted = self.emit_value(value);
+            let emitted = self.materialize(&value_type, emitted);
+            self.output
+                .line(&format!("{temporary}.data[{index}] = {emitted};"));
+        }
+        temporary
+    }
+
+    fn emit_index(&mut self, base: &Expr, index: &Expr) -> String {
+        let base_type = self.expression_type(base);
+        let base_value = self.emit_value(base);
+        let base_value = self.materialize(&base_type, base_value);
+        let index_type = self.expression_type(index);
+        let index_value = self.emit_value(index);
+        let index_value = self.materialize(&index_type, index_value);
+        format!("({base_value}).data[{index_value}]")
+    }
+
+    fn emit_slice(
+        &mut self,
+        base: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        expression: &Expr,
+    ) -> String {
+        let base_type = self.expression_type(base);
+        let (data, default_end) = match &base_type {
+            Type::Array { length, .. } => {
+                let place = self.emit_place(base);
+                let pointer = self.new_temporary();
+                self.output
+                    .line(&format!("{} *{pointer} = &({place});", c_type(&base_type)));
+                (format!("{pointer}->data"), length.to_string())
+            }
+            Type::Slice { .. } => {
+                let value = self.emit_value(base);
+                let value = self.materialize(&base_type, value);
+                (format!("{value}.data"), format!("{value}.len"))
+            }
+            _ => return "0".to_owned(),
+        };
+        let start = start.map_or_else(
+            || "((size_t)0)".to_owned(),
+            |value| {
+                let emitted = self.emit_value(value);
+                self.materialize(&self.expression_type(value), emitted)
+            },
+        );
+        let end = end.map_or(default_end, |value| {
+            let emitted = self.emit_value(value);
+            self.materialize(&self.expression_type(value), emitted)
+        });
+        let ty = self.expression_type(expression);
+        format!(
+            "(({}){{ .data = ({data}) + ({start}), .len = ({end}) - ({start}) }})",
+            c_type(&ty)
+        )
+    }
+
+    fn emit_get(&mut self, base: &Expr, arguments: &[Expr], expression: &Expr) -> String {
+        let Some(index) = arguments.first() else {
+            return "NULL".to_owned();
+        };
+        let base_type = self.expression_type(base);
+        let (data, length) = match &base_type {
+            Type::Array { length, .. } => {
+                let place = self.emit_place(base);
+                let pointer = self.new_temporary();
+                self.output
+                    .line(&format!("{} *{pointer} = &({place});", c_type(&base_type)));
+                (format!("{pointer}->data"), length.to_string())
+            }
+            Type::Slice { .. } => {
+                let emitted = self.emit_value(base);
+                let value = self.materialize(&base_type, emitted);
+                (format!("{value}.data"), format!("{value}.len"))
+            }
+            _ => return "NULL".to_owned(),
+        };
+        let emitted = self.emit_value(index);
+        let index = self.materialize(&self.expression_type(index), emitted);
+        format!(
+            "(({})(({index}) < ({length}) ? &({data})[{index}] : NULL))",
+            c_type(&self.expression_type(expression))
+        )
+    }
+
+    fn emit_slice_builtin(&mut self, name: &str, arguments: &[Expr], expression: &Expr) -> String {
+        let ty = self.expression_type(expression);
+        match name {
+            "empty_slice" | "empty_slice_mut" => {
+                format!("(({}){{ .data = NULL, .len = 0 }})", c_type(&ty))
+            }
+            "slice_from_parts" => {
+                let pointer = arguments.first().map_or_else(
+                    || "NULL".to_owned(),
+                    |argument| {
+                        let emitted = self.emit_value(argument);
+                        self.materialize(&self.expression_type(argument), emitted)
+                    },
+                );
+                let length = arguments.get(1).map_or_else(
+                    || "0".to_owned(),
+                    |argument| {
+                        let emitted = self.emit_value(argument);
+                        self.materialize(&self.expression_type(argument), emitted)
+                    },
+                );
+                format!(
+                    "(({}){{ .data = {pointer}, .len = {length} }})",
+                    c_type(&ty)
+                )
+            }
+            "slice_as_const" => {
+                let Some(argument) = arguments.first() else {
+                    return "0".to_owned();
+                };
+                let argument_type = self.expression_type(argument);
+                let emitted = self.emit_value(argument);
+                let value = self.materialize(&argument_type, emitted);
+                format!(
+                    "(({}){{ .data = {value}.data, .len = {value}.len }})",
+                    c_type(&ty)
+                )
+            }
+            _ => unreachable!("validated slice builtin"),
         }
     }
 
@@ -984,11 +1534,12 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             .get(enum_name)
             .is_some_and(|info| info.repr_c)
         {
-            self.output.line(&format!(
-                "{temporary} = {}_{};",
-                type_name(enum_name),
-                sanitize(variant)
-            ));
+            let variant_name = self.analysis.model.enums[enum_name]
+                .variant_c_names
+                .get(variant)
+                .cloned()
+                .unwrap_or_else(|| format!("{}_{}", type_name(enum_name), sanitize(variant)));
+            self.output.line(&format!("{temporary} = {variant_name};"));
             return temporary;
         }
         self.output.line(&format!(
@@ -1023,7 +1574,17 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
             let value = self.materialize(&field_type, value);
             self.output.line(&format!(
                 "{temporary}.{} = {value};",
-                local_name(&field.name)
+                match &ty {
+                    Type::Struct(name) => self
+                        .analysis
+                        .model
+                        .structs
+                        .get(name)
+                        .and_then(|info| info.field_c_names.get(&field.name))
+                        .cloned()
+                        .unwrap_or_else(|| local_name(&field.name)),
+                    _ => local_name(&field.name),
+                }
             ));
         }
         let _ = path;
@@ -1263,6 +1824,54 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
         self.output.close("}");
     }
 
+    fn emit_range_for(&mut self, binding: &str, sequence: &Expr, body: &Block) {
+        self.output.open("{");
+        self.push_scope();
+        let sequence_type = self.expression_type(sequence);
+        let emitted = self.emit_value(sequence);
+        let sequence_value = self.materialize(&sequence_type, emitted);
+        let element_type = match &sequence_type {
+            Type::Array { element, .. } | Type::Slice { element, .. } => element.as_ref().clone(),
+            _ => Type::Unknown,
+        };
+        let length_value = match sequence_type {
+            Type::Array { length, .. } => length.to_string(),
+            Type::Slice { .. } => format!("{sequence_value}.len"),
+            _ => "0".to_owned(),
+        };
+        let length = self.new_temporary();
+        let index = self.new_temporary();
+        self.output
+            .line(&format!("size_t {length} = {length_value};"));
+        self.output.line(&format!("size_t {index} = 0;"));
+        let condition_label = self.new_label("range_condition");
+        let continue_label = self.new_label("range_continue");
+        let break_label = self.new_label("range_break");
+        self.output.line(&format!("{condition_label}: ;"));
+        self.output
+            .line(&format!("if ({index} >= {length}) goto {break_label};"));
+        self.output.line(&format!(
+            "{} {} = {sequence_value}.data[{index}];",
+            c_type(&element_type),
+            local_name(binding)
+        ));
+        self.loop_targets.push(LoopTarget {
+            break_label: break_label.clone(),
+            continue_label: continue_label.clone(),
+            scope_depth: self.scopes.len(),
+        });
+        self.emit_block_assignment(body, None);
+        self.loop_targets.pop();
+        self.output.line(&format!("goto {continue_label};"));
+        self.output.line(&format!("{continue_label}: ;"));
+        self.output.line(&format!("{index} += 1;"));
+        self.output.line(&format!("goto {condition_label};"));
+        self.output.line(&format!("{break_label}: ;"));
+        self.emit_cleanup_current();
+        self.scopes.pop();
+        self.output.close("}");
+    }
+
     fn emit_block_value(&mut self, block: &Block, ty: Type) -> String {
         let result = (ty != Type::Unit).then(|| {
             let value = self.new_temporary();
@@ -1406,7 +2015,12 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
                     let field_types = info.fields.clone();
                     for field in fields {
                         if let Some(field_type) = field_types.get(&field.name) {
-                            let field_value = format!("({value}).{}", local_name(&field.name));
+                            let c_name = info
+                                .field_c_names
+                                .get(&field.name)
+                                .cloned()
+                                .unwrap_or_else(|| local_name(&field.name));
+                            let field_value = format!("({value}).{c_name}");
                             if let Some(pattern) = &field.pattern {
                                 self.emit_pattern_bindings(pattern, &field_value, field_type);
                             } else {
@@ -1439,9 +2053,46 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
                 "({}){}{}",
                 self.emit_place(base),
                 if *pointer { "->" } else { "." },
-                local_name(name)
+                self.field_c_name(base, name)
             ),
+            ExprKind::Index { base, index } => {
+                let base_type = self.expression_type(base);
+                let base_place = self.emit_place(base);
+                let index_type = self.expression_type(index);
+                let emitted = self.emit_value(index);
+                let index = self.materialize(&index_type, emitted);
+                let element_type = match &base_type {
+                    Type::Array { element, .. } | Type::Slice { element, .. } => {
+                        element.as_ref().clone()
+                    }
+                    _ => Type::Unknown,
+                };
+                let pointer = self.new_temporary();
+                self.output.line(&format!(
+                    "{} *{pointer} = &(({base_place}).data[{index}]);",
+                    c_type(&element_type)
+                ));
+                format!("*{pointer}")
+            }
             _ => self.emit_value(expression),
+        }
+    }
+
+    fn field_c_name(&self, base: &Expr, name: &str) -> String {
+        let aggregate = match self.expression_type(base) {
+            Type::Pointer { pointee, .. } => *pointee,
+            ty => ty,
+        };
+        match aggregate {
+            Type::Struct(struct_name) => self
+                .analysis
+                .model
+                .structs
+                .get(&struct_name)
+                .and_then(|info| info.field_c_names.get(name))
+                .cloned()
+                .unwrap_or_else(|| local_name(name)),
+            _ => local_name(name),
         }
     }
 
@@ -1507,49 +2158,14 @@ impl<'a, 'b> FunctionGenerator<'a, 'b> {
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span) {
+        let (source, source_span) = self.analysis.source_for_span(span);
         self.diagnostics.push(Diagnostic::error(
             code,
             message,
-            &self.analysis.source.path,
-            &self.analysis.source.text,
-            span,
+            &source.path,
+            &source.text,
+            source_span,
         ));
-    }
-}
-
-#[derive(Default)]
-struct Writer {
-    text: String,
-    indent: usize,
-}
-
-impl Writer {
-    fn line(&mut self, line: &str) {
-        if !line.is_empty() {
-            self.text.push_str(&"  ".repeat(self.indent));
-            self.text.push_str(line);
-        }
-        self.text.push('\n');
-    }
-
-    fn open(&mut self, line: &str) {
-        self.line(line);
-        self.indent += 1;
-    }
-
-    fn close(&mut self, line: &str) {
-        self.indent = self.indent.saturating_sub(1);
-        self.line(line);
-    }
-
-    fn reopen(&mut self, line: &str) {
-        self.indent = self.indent.saturating_sub(1);
-        self.line(line);
-        self.indent += 1;
-    }
-
-    fn finish(self) -> String {
-        self.text
     }
 }
 
@@ -1615,6 +2231,9 @@ fn function_c_name(info: &FunctionInfo) -> String {
 }
 
 fn resolve_type(model: &SemanticModel, reference: &TypeRef) -> Type {
+    if let Some(ty) = model.type_references.get(&reference.span()) {
+        return ty.clone();
+    }
     match reference {
         TypeRef::Named { path, .. } if path.len() == 1 => {
             crate::semantics::primitive_type(&path[0])
@@ -1642,60 +2261,71 @@ fn resolve_type(model: &SemanticModel, reference: &TypeRef) -> Type {
             mutable: *mutable,
             pointee: Box::new(resolve_type(model, pointee)),
         },
+        TypeRef::Array { element, .. } => Type::Array {
+            element: Box::new(resolve_type(model, element)),
+            length: 1,
+        },
+        TypeRef::Slice {
+            mutable, element, ..
+        } => Type::Slice {
+            mutable: *mutable,
+            element: Box::new(resolve_type(model, element)),
+        },
+        TypeRef::FunctionPointer {
+            extern_c,
+            parameters,
+            return_type,
+            ..
+        } => Type::FunctionPointer {
+            extern_c: *extern_c,
+            parameters: parameters
+                .iter()
+                .map(|parameter| resolve_type(model, parameter))
+                .collect(),
+            return_type: Box::new(resolve_type(model, return_type)),
+            effects: BTreeSet::new(),
+            error_type: None,
+        },
         _ => Type::Unknown,
     }
 }
 
-fn c_type(ty: &Type) -> String {
+fn collect_sequence_types(ty: &Type, seen: &mut BTreeSet<String>, output: &mut Vec<Type>) {
     match ty {
-        Type::Unit => "void".to_owned(),
-        Type::Bool => "bool".to_owned(),
-        Type::Int(IntType::I8) => "int8_t".to_owned(),
-        Type::Int(IntType::I16) => "int16_t".to_owned(),
-        Type::Int(IntType::I32) => "int32_t".to_owned(),
-        Type::Int(IntType::I64) => "int64_t".to_owned(),
-        Type::Int(IntType::U8) => "uint8_t".to_owned(),
-        Type::Int(IntType::U16) => "uint16_t".to_owned(),
-        Type::Int(IntType::U32) => "uint32_t".to_owned(),
-        Type::Int(IntType::U64) => "uint64_t".to_owned(),
-        Type::Int(IntType::Isize) => "ptrdiff_t".to_owned(),
-        Type::Int(IntType::Usize) => "size_t".to_owned(),
-        Type::Int(IntType::CChar) => "char".to_owned(),
-        Type::Int(IntType::CSChar) => "signed char".to_owned(),
-        Type::Int(IntType::CUChar) => "unsigned char".to_owned(),
-        Type::Int(IntType::CShort) => "short".to_owned(),
-        Type::Int(IntType::CUShort) => "unsigned short".to_owned(),
-        Type::Int(IntType::CInt) => "int".to_owned(),
-        Type::Int(IntType::CUInt) => "unsigned int".to_owned(),
-        Type::Int(IntType::CLong) => "long".to_owned(),
-        Type::Int(IntType::CULong) => "unsigned long".to_owned(),
-        Type::Int(IntType::CLongLong) => "long long".to_owned(),
-        Type::Int(IntType::CULongLong) => "unsigned long long".to_owned(),
-        Type::Float(FloatType::F32) => "float".to_owned(),
-        Type::Float(FloatType::F64) => "double".to_owned(),
-        Type::Float(FloatType::CFloat) => "float".to_owned(),
-        Type::Float(FloatType::CDouble) => "double".to_owned(),
-        Type::Float(FloatType::CLongDouble) => "long double".to_owned(),
-        Type::Char => "uint32_t".to_owned(),
-        Type::Str => "altc_str".to_owned(),
-        Type::Pointer {
-            mutable, pointee, ..
-        } => {
-            if **pointee == Type::Unit {
-                if *mutable {
-                    "void *".to_owned()
-                } else {
-                    "const void *".to_owned()
-                }
-            } else if *mutable {
-                format!("{} *", c_type(pointee))
-            } else {
-                format!("const {} *", c_type(pointee))
+        Type::Pointer { pointee, .. } => collect_sequence_types(pointee, seen, output),
+        Type::Array { element, length } => {
+            collect_sequence_types(element, seen, output);
+            let key = array_type_name(element, *length);
+            if seen.insert(key) {
+                output.push(ty.clone());
             }
         }
-        Type::Struct(name) | Type::Enum(name) => type_name(name),
-        Type::Opaque(name) => name.clone(),
-        Type::Never | Type::Unknown => "int32_t".to_owned(),
+        Type::Slice { mutable, element } => {
+            collect_sequence_types(element, seen, output);
+            let key = slice_type_name(*mutable, element);
+            if seen.insert(key) {
+                output.push(ty.clone());
+            }
+        }
+        Type::FunctionPointer {
+            parameters,
+            return_type,
+            error_type,
+            ..
+        } => {
+            for parameter in parameters {
+                collect_sequence_types(parameter, seen, output);
+            }
+            collect_sequence_types(return_type, seen, output);
+            if let Some(error_type) = error_type {
+                collect_sequence_types(error_type, seen, output);
+            }
+            let key = function_pointer_type_name(ty);
+            if seen.insert(key) {
+                output.push(ty.clone());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1871,6 +2501,10 @@ fn collect_saturating_operations(
                 visit_expression(condition, model, used);
                 visit_block(body, model, used);
             }
+            ExprKind::RangeFor { sequence, body, .. } => {
+                visit_expression(sequence, model, used);
+                visit_block(body, model, used);
+            }
             ExprKind::For {
                 initializer,
                 condition,
@@ -1899,6 +2533,19 @@ fn collect_saturating_operations(
                 }
             }
             ExprKind::Field { base, .. } => visit_expression(base, model, used),
+            ExprKind::Index { base, index } => {
+                visit_expression(base, model, used);
+                visit_expression(index, model, used);
+            }
+            ExprKind::Slice { base, start, end } => {
+                visit_expression(base, model, used);
+                if let Some(start) = start {
+                    visit_expression(start, model, used);
+                }
+                if let Some(end) = end {
+                    visit_expression(end, model, used);
+                }
+            }
             ExprKind::Propagate(value)
             | ExprKind::Unary { value, .. }
             | ExprKind::Cast { value, .. }
@@ -1906,6 +2553,11 @@ fn collect_saturating_operations(
             ExprKind::StructLiteral { fields, .. } => {
                 for field in fields {
                     visit_expression(&field.value, model, used);
+                }
+            }
+            ExprKind::ArrayLiteral(values) => {
+                for value in values {
+                    visit_expression(value, model, used);
                 }
             }
             ExprKind::Return(value) => {
@@ -1976,7 +2628,7 @@ fn expression_has_direct_break(expression: &Expr) -> bool {
                     .iter()
                     .any(|arm| expression_has_direct_break(&arm.value))
         }
-        ExprKind::While { .. } | ExprKind::For { .. } => false,
+        ExprKind::While { .. } | ExprKind::For { .. } | ExprKind::RangeFor { .. } => false,
         ExprKind::Call { callee, arguments } => {
             expression_has_direct_break(callee) || arguments.iter().any(expression_has_direct_break)
         }
@@ -1985,6 +2637,14 @@ fn expression_has_direct_break(expression: &Expr) -> bool {
         | ExprKind::Unary { value: base, .. }
         | ExprKind::Cast { value: base, .. }
         | ExprKind::Raise(base) => expression_has_direct_break(base),
+        ExprKind::Index { base, index } => {
+            expression_has_direct_break(base) || expression_has_direct_break(index)
+        }
+        ExprKind::Slice { base, start, end } => {
+            expression_has_direct_break(base)
+                || start.as_deref().is_some_and(expression_has_direct_break)
+                || end.as_deref().is_some_and(expression_has_direct_break)
+        }
         ExprKind::Binary { left, right, .. } => {
             expression_has_direct_break(left) || expression_has_direct_break(right)
         }
@@ -1994,6 +2654,7 @@ fn expression_has_direct_break(expression: &Expr) -> bool {
         ExprKind::StructLiteral { fields, .. } => fields
             .iter()
             .any(|field| expression_has_direct_break(&field.value)),
+        ExprKind::ArrayLiteral(values) => values.iter().any(expression_has_direct_break),
         ExprKind::Return(value) => value.as_deref().is_some_and(expression_has_direct_break),
         ExprKind::Literal(_)
         | ExprKind::Path(_)
@@ -2158,11 +2819,12 @@ fn pattern_condition(pattern: &Pattern, value: &str, ty: &Type, model: &Semantic
             if matches!(ty, Type::Enum(name) if name == enum_name)
                 && model.enums.get(enum_name).is_some_and(|info| info.repr_c)
             {
-                format!(
-                    "({value}) == {}_{}",
-                    type_name(enum_name),
-                    sanitize(variant)
-                )
+                let variant = model.enums[enum_name]
+                    .variant_c_names
+                    .get(variant)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}_{}", type_name(enum_name), sanitize(variant)));
+                format!("({value}) == {variant}")
             } else {
                 format!(
                     "({value}).tag == {}_{}",
@@ -2180,7 +2842,11 @@ fn enum_value(path: &[String], model: &SemanticModel) -> String {
         return "0".to_owned();
     };
     if model.enums.get(enum_name).is_some_and(|info| info.repr_c) {
-        format!("{}_{}", type_name(enum_name), sanitize(variant))
+        model.enums[enum_name]
+            .variant_c_names
+            .get(variant)
+            .cloned()
+            .unwrap_or_else(|| format!("{}_{}", type_name(enum_name), sanitize(variant)))
     } else {
         format!(
             "(({}){{ .tag = {}_{} }})",
@@ -2195,38 +2861,12 @@ fn split_variant(path: &[String]) -> Option<(&str, &str)> {
     (path.len() == 2).then(|| (path[0].as_str(), path[1].as_str()))
 }
 
-fn type_name(name: &str) -> String {
-    format!("altc_{}", sanitize(name))
-}
-
-fn tag_name(name: &str) -> String {
-    format!("altc_tag_{}", sanitize(name))
-}
-
-fn local_name(name: &str) -> String {
-    format!("v_{}", sanitize(name))
-}
-
-fn const_name(name: &str) -> String {
-    format!("altc_const_{}", sanitize(name))
-}
-
-fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use crate::Effect;
+    use crate::semantics::FloatType;
     use crate::{AnalyzeOptions, SourceFile, analyze};
 
     use super::*;
@@ -2250,6 +2890,59 @@ mod tests {
         .unwrap();
         assert!(generated.source.contains("int main(void)"));
         assert!(generated.source.contains("int32_t altc_fn_add"));
+    }
+
+    #[test]
+    fn emits_sequence_and_function_pointer_fixtures_through_the_full_backend() {
+        for (name, source) in [
+            (
+                "sequences",
+                include_str!("../../../tests/fixtures/sequences.altc"),
+            ),
+            (
+                "ffi_core",
+                include_str!("../../../tests/fixtures/ffi_core.altc"),
+            ),
+            (
+                "raising_callback",
+                include_str!("../../../tests/fixtures/raising_callback.altc"),
+            ),
+        ] {
+            let analysis = analyze(
+                SourceFile::new(format!("{name}.altc"), source),
+                &AnalyzeOptions::default(),
+            );
+            assert!(analysis.succeeded(), "{name}: {:?}", analysis.diagnostics);
+            let generated = emit_c(
+                &analysis,
+                &CodegenOptions {
+                    unit_name: name.to_owned(),
+                },
+            )
+            .unwrap();
+            assert!(generated.source.contains("Generated by altc"));
+        }
+
+        let source = r#"
+fn views(pointer: *mut i32) -> usize {
+  let view: []mut i32 = slice_from_parts[i32](pointer, 1usize);
+  let none: []const i32 = empty_slice[i32]();
+  let none_mut: []mut i32 = empty_slice_mut[i32]();
+  let const_view: []const i32 = slice_as_const(view);
+  let values: [i32; 3usize] = [1, 2, 3];
+  let a = values[..2usize];
+  let b = values[1usize..];
+  let c = values[..];
+  match values.get(0usize) { nonnull(value) => *value as usize, null => 0usize, } +
+    const_view.len + none.len + none_mut.len + a.len + b.len + c.len
+}
+"#;
+        let analysis = analyze(
+            SourceFile::new("all_sequences.altc", source),
+            &AnalyzeOptions::default(),
+        );
+        assert!(analysis.succeeded(), "{:?}", analysis.diagnostics);
+        emit_c(&analysis, &CodegenOptions::default()).unwrap();
     }
 
     #[test]
@@ -2302,7 +2995,9 @@ mod tests {
             FloatType::CDouble,
             FloatType::CLongDouble,
         ] {
-            assert!(!c_type(&Type::Float(kind)).is_empty());
+            let ty = Type::Float(kind);
+            assert!(!c_type(&ty).is_empty());
+            assert!(!array_type_name(&ty, 2).is_empty());
         }
         for ty in [
             Type::Unit,
@@ -2334,10 +3029,107 @@ mod tests {
                 mutable: false,
                 pointee: Box::new(Type::Int(IntType::I32)),
             },
+            Type::Array {
+                element: Box::new(Type::Bool),
+                length: 3,
+            },
+            Type::Slice {
+                mutable: true,
+                element: Box::new(Type::Char),
+            },
+            Type::Slice {
+                mutable: false,
+                element: Box::new(Type::Pointer {
+                    nullable: false,
+                    mutable: true,
+                    pointee: Box::new(Type::Int(IntType::I32)),
+                }),
+            },
+            Type::FunctionPointer {
+                extern_c: false,
+                parameters: vec![Type::Int(IntType::I32)],
+                return_type: Box::new(Type::Bool),
+                effects: BTreeSet::from([
+                    Effect::Alloc,
+                    Effect::Free,
+                    Effect::Raise("CallbackError".to_owned()),
+                ]),
+                error_type: Some(Box::new(Type::Enum("CallbackError".to_owned()))),
+            },
         ] {
             assert!(!c_type(&ty).is_empty());
+            assert!(!array_type_name(&ty, 2).is_empty());
+            assert!(!slice_type_name(false, &ty).is_empty());
         }
+        assert!(slice_data_pointer_type(true, &Type::Bool).ends_with('*'));
+        assert!(slice_data_pointer_type(false, &Type::Bool).starts_with("const"));
+        assert!(
+            slice_data_pointer_type(
+                false,
+                &Type::FunctionPointer {
+                    extern_c: true,
+                    parameters: Vec::new(),
+                    return_type: Box::new(Type::Unit),
+                    effects: BTreeSet::new(),
+                    error_type: None,
+                }
+            )
+            .contains("const *")
+        );
         assert_eq!(unsigned_c_type(&Type::Bool), "size_t");
+
+        let span = Span::new(0, 1);
+        let literal = |raw: &str| Expr {
+            id: 0,
+            kind: ExprKind::Literal(Literal::Int(raw.to_owned())),
+            span,
+        };
+        for (kind, raw) in [
+            (IntType::I8, "128i8".to_owned()),
+            (IntType::I16, "32768i16".to_owned()),
+            (IntType::I32, "2147483648i32".to_owned()),
+            (IntType::I64, "9223372036854775808i64".to_owned()),
+            (IntType::Isize, (isize::MAX as u128 + 1).to_string()),
+            (
+                IntType::CChar,
+                (std::ffi::c_char::MAX as u128 + 1).to_string(),
+            ),
+            (
+                IntType::CSChar,
+                (std::ffi::c_schar::MAX as u128 + 1).to_string(),
+            ),
+            (
+                IntType::CShort,
+                (std::ffi::c_short::MAX as u128 + 1).to_string(),
+            ),
+            (
+                IntType::CInt,
+                (std::ffi::c_int::MAX as u128 + 1).to_string(),
+            ),
+            (
+                IntType::CLong,
+                (std::ffi::c_long::MAX as u128 + 1).to_string(),
+            ),
+            (
+                IntType::CLongLong,
+                (std::ffi::c_longlong::MAX as u128 + 1).to_string(),
+            ),
+        ] {
+            assert!(signed_minimum_c(&literal(&raw), &Type::Int(kind)).is_some());
+        }
+        assert!(signed_minimum_c(&literal("1"), &Type::Bool).is_none());
+        assert!(signed_minimum_c(&literal("1"), &Type::Int(IntType::U8)).is_none());
+        assert!(
+            signed_minimum_c(
+                &Expr {
+                    id: 1,
+                    kind: ExprKind::Literal(Literal::Bool(false)),
+                    span,
+                },
+                &Type::Int(IntType::I32),
+            )
+            .is_none()
+        );
 
         for operator in [
             UnaryOp::Not,
@@ -2447,14 +3239,26 @@ mod tests {
             "CFlag".to_owned(),
             crate::semantics::EnumInfo {
                 variants: BTreeMap::from([("On".to_owned(), Vec::new())]),
+                variant_public: BTreeMap::new(),
+                variant_c_names: BTreeMap::new(),
                 repr_c: true,
+                is_extern: false,
+                c_name: "CFlag".to_owned(),
+                c_typedef: false,
+                span,
             },
         );
         model.enums.insert(
             "Payload".to_owned(),
             crate::semantics::EnumInfo {
                 variants: BTreeMap::from([("Some".to_owned(), vec![Type::Int(IntType::I32)])]),
+                variant_public: BTreeMap::new(),
+                variant_c_names: BTreeMap::new(),
                 repr_c: false,
+                is_extern: false,
+                c_name: "Payload".to_owned(),
+                c_typedef: false,
+                span,
             },
         );
         let cases = [
@@ -2544,14 +3348,25 @@ mod tests {
             "S".to_owned(),
             crate::semantics::StructInfo {
                 fields: BTreeMap::new(),
+                field_public: BTreeMap::new(),
+                field_c_names: BTreeMap::new(),
                 repr_c: false,
+                is_extern: false,
+                c_name: "S".to_owned(),
+                c_typedef: false,
             },
         );
         model.enums.insert(
             "E".to_owned(),
             crate::semantics::EnumInfo {
                 variants: BTreeMap::new(),
+                variant_public: BTreeMap::new(),
+                variant_c_names: BTreeMap::new(),
                 repr_c: false,
+                is_extern: false,
+                c_name: "E".to_owned(),
+                c_typedef: false,
+                span: Span::default(),
             },
         );
         model
@@ -2617,6 +3432,67 @@ mod tests {
             span,
         };
         assert_eq!(resolve_type(&model, &qualified), Type::Unknown);
+        let array = TypeRef::Array {
+            element: Box::new(TypeRef::Named {
+                path: vec!["i32".to_owned()],
+                span,
+            }),
+            length: Box::new(Expr {
+                id: 0,
+                kind: ExprKind::Literal(Literal::Int("2usize".to_owned())),
+                span,
+            }),
+            span,
+        };
+        let slice = TypeRef::Slice {
+            mutable: true,
+            element: Box::new(TypeRef::Named {
+                path: vec!["bool".to_owned()],
+                span,
+            }),
+            span,
+        };
+        let function_pointer = TypeRef::FunctionPointer {
+            extern_c: false,
+            parameters: vec![TypeRef::Named {
+                path: vec!["i32".to_owned()],
+                span,
+            }],
+            return_type: Box::new(TypeRef::Named {
+                path: vec!["bool".to_owned()],
+                span,
+            }),
+            effects: Vec::new(),
+            span,
+        };
+        assert!(matches!(resolve_type(&model, &array), Type::Array { .. }));
+        assert!(matches!(resolve_type(&model, &slice), Type::Slice { .. }));
+        assert!(matches!(
+            resolve_type(&model, &function_pointer),
+            Type::FunctionPointer { .. }
+        ));
+
+        let nested = Type::FunctionPointer {
+            extern_c: false,
+            parameters: vec![Type::Array {
+                element: Box::new(Type::Bool),
+                length: 2,
+            }],
+            return_type: Box::new(Type::Slice {
+                mutable: false,
+                element: Box::new(Type::Char),
+            }),
+            effects: BTreeSet::new(),
+            error_type: Some(Box::new(Type::Pointer {
+                nullable: false,
+                mutable: false,
+                pointee: Box::new(Type::Int(IntType::I32)),
+            })),
+        };
+        let mut seen = BTreeSet::new();
+        let mut collected = Vec::new();
+        collect_sequence_types(&nested, &mut seen, &mut collected);
+        assert!(collected.len() >= 3);
 
         let mut writer = Writer::default();
         writer.line("");
@@ -2638,6 +3514,7 @@ pub struct PublicPair { pub left: i32, pub right: i32, }
 @repr(C)
 pub enum PublicFlag { Off, On, }
 enum Error { Failed, Other, }
+enum Payload { Some(i32), None, }
 const BASE: i32 = 1;
 const NEGATIVE: i32 = -BASE;
 const SUM: i32 = BASE + 2;
@@ -2663,11 +3540,17 @@ fn handle(flag: bool) {
   try { unit_raise(flag)? } catch { Error::Failed => {}, Error::Other => {}, }
 }
 fn unit_tail() { handle(false) }
+fn payload() -> Payload { Payload::Some(1) }
+fn returns() -> i32 { return 1; }
 fn exercise(pointer: *mut PublicPair, address: usize, flag: bool) -> i32 {
   const LOCAL: i32 = 2;
   let mut pair: PublicPair = PublicPair { left: BASE, right: LOCAL, };
   let mut value: i32 = { let inner: i32 = 3; inner };
   let mut unsigned: u32 = 7u32;
+  let mut small: u8 = 3u8;
+  small +|= 1u8;
+  small -|= 1u8;
+  small *|= 2u8;
   value += 1;
   value -= 1;
   value *= 2;
@@ -2698,6 +3581,14 @@ fn exercise(pointer: *mut PublicPair, address: usize, flag: bool) -> i32 {
   if logic { value += 1; };
   while value < 5 { value += 1; continue; };
   for (value = 0; value < 2; value += 1) { if value == 1 { break; }; };
+  for (let mut index: i32 = 0; index < 1; index += 1) { value += index; };
+  for item in [1, 2] { value += item; };
+  let sequence: [i32; 2usize] = [1, 2];
+  let mutable_view: []const i32 = sequence[..];
+  let subview: []const i32 = mutable_view[..];
+  subview.len;
+  let chosen: i32 = if flag { 1 } else if false { 2 } else { 3 };
+  payload(); returns(); chosen; small;
   match pair { PublicPair { left, right: renamed, } => { value += left + renamed; }, _ => {}, };
   match PublicFlag::On() { PublicFlag::On => value += 1, PublicFlag::Off => value += 2, };
   match restored { nonnull(found) => found->left, null => {
@@ -2942,6 +3833,22 @@ fn boundaries() -> bool {
                 },
             ),
             expression(21, ExprKind::Return(Some(Box::new(broken.clone())))),
+            expression(
+                24,
+                ExprKind::Index {
+                    base: Box::new(literal(25)),
+                    index: Box::new(broken.clone()),
+                },
+            ),
+            expression(
+                26,
+                ExprKind::Slice {
+                    base: Box::new(literal(27)),
+                    start: Some(Box::new(broken.clone())),
+                    end: Some(Box::new(literal(28))),
+                },
+            ),
+            expression(29, ExprKind::ArrayLiteral(vec![broken.clone()])),
         ];
         assert!(cases.iter().all(expression_has_direct_break));
         assert!(!expression_has_direct_break(&expression(
@@ -2952,6 +3859,45 @@ fn boundaries() -> bool {
             }
         )));
         assert!(!expression_has_direct_break(&literal(23)));
+
+        let array_type = Type::Array {
+            element: Box::new(Type::Int(IntType::I32)),
+            length: 2,
+        };
+        let slice_type = Type::Slice {
+            mutable: true,
+            element: Box::new(Type::Int(IntType::I32)),
+        };
+        let pointer_result = Type::Pointer {
+            nullable: true,
+            mutable: true,
+            pointee: Box::new(Type::Int(IntType::I32)),
+        };
+        let raising_pointer = Type::FunctionPointer {
+            extern_c: false,
+            parameters: Vec::new(),
+            return_type: Box::new(Type::Unit),
+            effects: BTreeSet::from([Effect::Raise("E".to_owned())]),
+            error_type: Some(Box::new(Type::Enum("E".to_owned()))),
+        };
+        let unit_pointer = Type::FunctionPointer {
+            extern_c: false,
+            parameters: Vec::new(),
+            return_type: Box::new(Type::Unit),
+            effects: BTreeSet::new(),
+            error_type: None,
+        };
+        for (id, ty) in [
+            (4000, raising_pointer),
+            (4001, unit_pointer),
+            (4002, array_type.clone()),
+            (4003, slice_type.clone()),
+            (4004, slice_type.clone()),
+            (4005, pointer_result.clone()),
+            (4006, Type::Int(IntType::Usize)),
+        ] {
+            analysis.model.expression_types.insert(id, ty);
+        }
 
         let info = analysis.model.functions["sample"].clone();
         let mut output = Writer::default();
@@ -3022,6 +3968,39 @@ fn boundaries() -> bool {
         );
         assert_eq!(generator.materialize(&Type::Bool, String::new()), "");
         assert_eq!(generator.emit_place(&unknown), "false");
+        let raising_pointer = literal(4000);
+        let unit_pointer = literal(4001);
+        assert_eq!(generator.emit_indirect_call(&unknown, &[], false), "0");
+        assert_eq!(
+            generator.emit_indirect_call(&raising_pointer, &[], false),
+            "0"
+        );
+        assert!(
+            generator
+                .emit_indirect_call(&unit_pointer, &[], false)
+                .is_empty()
+        );
+        let array = literal(4002);
+        let slice = literal(4003);
+        let slice_result = literal(4004);
+        let get_result = literal(4005);
+        let index = expression(4006, ExprKind::Literal(Literal::Int("0usize".to_owned())));
+        let _ = generator.emit_index(&array, &index);
+        let _ = generator.emit_slice(&array, None, None, &slice_result);
+        let _ = generator.emit_slice(&slice, None, None, &slice_result);
+        let _ = generator.emit_slice(&unknown, None, None, &slice_result);
+        let _ = generator.emit_get(&array, &[], &get_result);
+        let _ = generator.emit_get(&unknown, std::slice::from_ref(&index), &get_result);
+        let _ = generator.emit_slice_builtin("slice_from_parts", &[], &slice_result);
+        let _ = generator.emit_slice_builtin("slice_as_const", &[], &slice_result);
+        let _ = generator.emit_value(&expression(
+            4007,
+            ExprKind::Field {
+                base: Box::new(unknown.clone()),
+                name: "len".to_owned(),
+                pointer: false,
+            },
+        ));
         generator.loop_targets.push(LoopTarget {
             break_label: "break_label".to_owned(),
             continue_label: "continue_label".to_owned(),
@@ -3037,5 +4016,38 @@ fn boundaries() -> bool {
         assert!(!output.finish().is_empty());
         assert_eq!(diagnostics[0].code, "ALTC5003");
         assert_eq!(diagnostics[1].code, "TEST");
+
+        let mut invalid_codegen = analysis.clone();
+        let sample = invalid_codegen
+            .program
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Function(function) if function.name == "sample" => Some(function),
+                _ => None,
+            })
+            .unwrap();
+        sample.body.as_mut().unwrap().tail = Some(Box::new(expression(
+            5000,
+            ExprKind::TypeApply {
+                path: vec!["not_a_builtin".to_owned()],
+                arguments: vec![i32_reference],
+            },
+        )));
+        assert!(emit_c(&invalid_codegen, &CodegenOptions::default()).is_err());
+
+        let options = CodegenOptions::default();
+        let mut top_level = Generator::new(&analysis, &options);
+        top_level.emit_named_type("missing");
+        top_level.emitted_named_types.insert("E".to_owned());
+        top_level.emit_named_type("E");
+        top_level.emit_backend_type(&Type::FunctionPointer {
+            extern_c: false,
+            parameters: Vec::new(),
+            return_type: Box::new(Type::Unit),
+            effects: BTreeSet::from([Effect::Raise("E".to_owned())]),
+            error_type: Some(Box::new(Type::Enum("E".to_owned()))),
+        });
+        assert!(!top_level.output.finish().is_empty());
     }
 }

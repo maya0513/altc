@@ -6,7 +6,7 @@
       "line": 2
     },
     "file": "eval/repair/nullable-dereference/broken.altc",
-    "help": null,
+    "help": "match the pointer with `nonnull(value)` and `null` before dereferencing it",
     "labels": [
       {
         "message": "",
@@ -14,6 +14,14 @@
         "span": {
           "end": 49,
           "start": 41
+        }
+      },
+      {
+        "message": "nullable pointer declared here",
+        "primary": false,
+        "span": {
+          "end": 28,
+          "start": 8
         }
       }
     ],

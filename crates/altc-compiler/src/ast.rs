@@ -11,12 +11,19 @@ pub(crate) struct Program {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Item {
+    Import(ImportDecl),
     Const(ConstDecl),
     Function(Function),
     Struct(StructDecl),
     Enum(EnumDecl),
     Extern(ExternBlock),
     Unsupported { feature: String, span: Span },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImportDecl {
+    pub path: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +90,7 @@ pub(crate) struct StructDecl {
 
 #[derive(Clone, Debug)]
 pub(crate) struct FieldDecl {
+    pub attributes: Vec<Attribute>,
     pub public: bool,
     pub name: String,
     pub ty: TypeRef,
@@ -113,7 +121,20 @@ pub(crate) struct ExternBlock {
     pub header: String,
     pub functions: Vec<Function>,
     pub opaque_types: Vec<OpaqueType>,
+    pub globals: Vec<ExternGlobal>,
+    pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExternGlobal {
+    pub attributes: Vec<Attribute>,
+    pub mutable: bool,
+    pub name: String,
+    pub ty: TypeRef,
+    pub span: Span,
+    pub header: String,
 }
 
 #[derive(Clone, Debug)]
@@ -132,7 +153,7 @@ impl OpaqueType {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum TypeRef {
     Named {
         path: Vec<String>,
@@ -142,6 +163,23 @@ pub(crate) enum TypeRef {
         nullable: bool,
         mutable: bool,
         pointee: Box<TypeRef>,
+        span: Span,
+    },
+    Array {
+        element: Box<TypeRef>,
+        length: Box<Expr>,
+        span: Span,
+    },
+    Slice {
+        mutable: bool,
+        element: Box<TypeRef>,
+        span: Span,
+    },
+    FunctionPointer {
+        extern_c: bool,
+        parameters: Vec<TypeRef>,
+        return_type: Box<TypeRef>,
+        effects: Vec<EffectRef>,
         span: Span,
     },
     Unsupported {
@@ -155,6 +193,9 @@ impl TypeRef {
         match self {
             Self::Named { span, .. }
             | Self::Pointer { span, .. }
+            | Self::Array { span, .. }
+            | Self::Slice { span, .. }
+            | Self::FunctionPointer { span, .. }
             | Self::Unsupported { span, .. } => *span,
         }
     }
@@ -216,6 +257,12 @@ pub(crate) enum ExprKind {
         update: Option<Box<Expr>>,
         body: Block,
     },
+    RangeFor {
+        binding: String,
+        binding_span: Span,
+        sequence: Box<Expr>,
+        body: Block,
+    },
     Call {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
@@ -228,6 +275,15 @@ pub(crate) enum ExprKind {
         base: Box<Expr>,
         name: String,
         pointer: bool,
+    },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Slice {
+        base: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
     },
     Propagate(Box<Expr>),
     Unary {
@@ -252,6 +308,7 @@ pub(crate) enum ExprKind {
         path: Vec<String>,
         fields: Vec<FieldInitializer>,
     },
+    ArrayLiteral(Vec<Expr>),
     Raise(Box<Expr>),
     Return(Option<Box<Expr>>),
     Break,

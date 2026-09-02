@@ -1,0 +1,6 @@
+import model;
+
+@c_name("telemetry_altc_score")
+export "C" fn exported_score(reading: model::Reading) -> i32 {
+  reading.value * reading.weight
+}

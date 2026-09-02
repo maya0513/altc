@@ -1,0 +1,33 @@
+struct Grid {
+  rows: [[Cell; 2usize]; 2usize],
+}
+
+struct Cell {
+  value: i32,
+}
+
+fn sum(values: []const i32) -> i32 {
+  let mut total: i32 = 0;
+  for value in values {
+    total += value;
+  };
+  total
+}
+
+@entry
+fn application_main() -> c_int {
+  let mut values: [i32; 4usize] = [1, 2, 3, 4];
+  values[1usize] = 5;
+  let view: []mut i32 = values[1usize..];
+  match view.get(0usize) {
+    nonnull(first) => *first += 1,
+    null => {},
+  };
+  let grid = Grid {
+    rows: [
+      [Cell { value: 1, }, Cell { value: 2, }],
+      [Cell { value: 7, }, Cell { value: 8, }],
+    ],
+  };
+  (sum(slice_as_const(view)) + grid.rows[1usize][0usize].value) as c_int
+}

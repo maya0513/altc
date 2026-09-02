@@ -1,0 +1,39 @@
+import model;
+
+extern "C" from "telemetry.h" {
+  @c_typedef("telemetry_record_t")
+  struct CRecord {
+    @c_name("value") value: c_int,
+    @c_name("weight") weight: c_int,
+  }
+
+  @c_name("telemetry_state")
+  enum CState {
+    @c_name("TELEMETRY_READY") Ready,
+    @c_name("TELEMETRY_STOPPED") Stopped,
+  }
+
+  @c_name("telemetry_batches") var batches: c_int;
+  @c_name("telemetry_limit") const limit: c_int;
+
+  @c_name("telemetry_apply")
+  fn apply(callback: extern "C" fn(c_int) -> c_int, value: c_int) -> c_int;
+}
+
+fn increment(value: c_int) -> c_int {
+  value + 1
+}
+
+pub fn external_score(reading: model::Reading) -> i32 {
+  batches += 1;
+  let record = CRecord {
+    value: reading.value as c_int,
+    weight: reading.weight as c_int,
+  };
+  let state: CState = CState::Ready;
+  let ready: c_int = match state {
+    CState::Ready => 1,
+    CState::Stopped => 0,
+  };
+  (apply(increment, record.value * record.weight) + limit + batches + ready) as i32
+}

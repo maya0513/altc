@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3053",
+    "end": {
+      "column": 16,
+      "line": 4
+    },
+    "file": "eval/repair/array-bounds/broken.altc",
+    "help": "use an index from 0 through 1",
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 93,
+          "start": 87
+        }
+      }
+    ],
+    "message": "array index is outside the known length 2",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 93,
+      "start": 87
+    },
+    "start": {
+      "column": 10,
+      "line": 4
+    }
+  }
+]

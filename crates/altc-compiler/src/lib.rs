@@ -6,12 +6,14 @@ mod diagnostic;
 mod lexer;
 mod literal;
 mod parser;
+mod project;
 mod semantics;
 mod syntax;
 
 pub use codegen::{CodegenOptions, GeneratedUnit, emit_c};
 pub use diagnostic::{Diagnostic, Label, Severity, SourcePosition, Span};
 pub use lexer::{Lexed, Token, TokenKind, lex};
+pub use project::{AnalysisModule, ModuleLoadError, ModuleLoader, ModulePath, analyze_project};
 pub use semantics::{Analysis, AnalyzeOptions, Effect, MemoryCategory, MemorySummary, analyze};
 pub use syntax::{AltcLanguage, SyntaxKind, SyntaxNode};
 

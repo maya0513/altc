@@ -2,64 +2,20 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use serde::Serialize;
-
 use crate::SourceFile;
 use crate::ast::*;
-use crate::diagnostic::{Diagnostic, Span};
+use crate::diagnostic::{Diagnostic, Span, position};
 use crate::lexer::lex;
 use crate::literal::{decode_quoted, parse_float, parse_integer};
 use crate::parser::parse;
 use crate::syntax::SyntaxNode;
 
-#[derive(Clone, Debug, Default)]
-pub struct AnalyzeOptions {
-    /// Reserved for future target-specific analysis. v0 always uses the host ABI.
-    pub target: Option<String>,
-}
+mod model;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(tag = "kind", content = "error_type", rename_all = "kebab-case")]
-pub enum Effect {
-    Alloc,
-    Free,
-    Raise(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MemoryCategory {
-    IndirectRead,
-    IndirectWrite,
-    GlobalRead,
-    GlobalWrite,
-    VolatileRead,
-    VolatileWrite,
-    ExternCall,
-    IndirectCall,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct MemoryEvent {
-    pub category: MemoryCategory,
-    pub span: Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct MemoryVia {
-    pub category: MemoryCategory,
-    pub callee: String,
-    pub call_span: Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct MemorySummary {
-    pub function: String,
-    pub effects: BTreeSet<Effect>,
-    pub categories: BTreeSet<MemoryCategory>,
-    pub direct: Vec<MemoryEvent>,
-    pub transitive: Vec<MemoryVia>,
-}
+pub use model::{AnalyzeOptions, Effect, MemoryCategory, MemoryEvent, MemorySummary, MemoryVia};
+pub(crate) use model::{
+    EnumInfo, FloatType, FunctionInfo, GlobalInfo, IntType, SemanticModel, StructInfo, Type,
+};
 
 #[derive(Clone, Debug)]
 pub struct Analysis {
@@ -67,8 +23,17 @@ pub struct Analysis {
     pub cst: SyntaxNode,
     pub diagnostics: Vec<Diagnostic>,
     pub memory_summaries: Vec<MemorySummary>,
+    modules: Vec<crate::AnalysisModule>,
+    pub(crate) span_sources: Vec<ModuleSpanSource>,
     pub(crate) program: Program,
     pub(crate) model: SemanticModel,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ModuleSpanSource {
+    pub start: usize,
+    pub end: usize,
+    pub source: SourceFile,
 }
 
 impl Analysis {
@@ -93,186 +58,33 @@ impl Analysis {
     #[must_use]
     pub fn has_extern_declarations(&self) -> bool {
         self.program.items.iter().any(|item| match item {
-            Item::Extern(block) => !block.functions.is_empty() || !block.opaque_types.is_empty(),
+            Item::Extern(block) => {
+                !block.functions.is_empty()
+                    || !block.opaque_types.is_empty()
+                    || !block.globals.is_empty()
+                    || !block.structs.is_empty()
+                    || !block.enums.is_empty()
+            }
             _ => false,
         })
     }
-}
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum Type {
-    Unit,
-    Bool,
-    Int(IntType),
-    Float(FloatType),
-    Char,
-    Str,
-    Pointer {
-        nullable: bool,
-        mutable: bool,
-        pointee: Box<Type>,
-    },
-    Struct(String),
-    Enum(String),
-    Opaque(String),
-    Never,
-    Unknown,
-}
-
-impl Type {
-    pub(crate) fn display(&self) -> String {
-        match self {
-            Self::Unit => "unit".to_owned(),
-            Self::Bool => "bool".to_owned(),
-            Self::Int(kind) => kind.name().to_owned(),
-            Self::Float(FloatType::F32) => "f32".to_owned(),
-            Self::Float(FloatType::F64) => "f64".to_owned(),
-            Self::Float(FloatType::CFloat) => "c_float".to_owned(),
-            Self::Float(FloatType::CDouble) => "c_double".to_owned(),
-            Self::Float(FloatType::CLongDouble) => "c_longdouble".to_owned(),
-            Self::Char => "char".to_owned(),
-            Self::Str => "str".to_owned(),
-            Self::Pointer {
-                nullable,
-                mutable,
-                pointee,
-            } => format!(
-                "{}*{} {}",
-                if *nullable { "?" } else { "" },
-                if *mutable { "mut" } else { "const" },
-                pointee.display()
-            ),
-            Self::Struct(name) | Self::Enum(name) | Self::Opaque(name) => name.clone(),
-            Self::Never => "<never>".to_owned(),
-            Self::Unknown => "<unknown>".to_owned(),
-        }
+    #[must_use]
+    pub fn modules(&self) -> &[crate::AnalysisModule] {
+        &self.modules
     }
 
-    pub(crate) const fn is_numeric(&self) -> bool {
-        matches!(self, Self::Int(_) | Self::Float(_))
+    pub(crate) fn source_for_span(&self, span: Span) -> (&SourceFile, Span) {
+        self.span_sources
+            .iter()
+            .find(|mapping| span.start >= mapping.start && span.end <= mapping.end)
+            .map_or((&self.source, span), |mapping| {
+                (
+                    &mapping.source,
+                    Span::new(span.start - mapping.start, span.end - mapping.start),
+                )
+            })
     }
-
-    pub(crate) const fn is_integer(&self) -> bool {
-        matches!(self, Self::Int(_))
-    }
-
-    pub(crate) const fn is_storable(&self) -> bool {
-        !matches!(self, Self::Unit | Self::Never | Self::Unknown)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum IntType {
-    I8,
-    I16,
-    I32,
-    I64,
-    U8,
-    U16,
-    U32,
-    U64,
-    Isize,
-    Usize,
-    CChar,
-    CSChar,
-    CUChar,
-    CShort,
-    CUShort,
-    CInt,
-    CUInt,
-    CLong,
-    CULong,
-    CLongLong,
-    CULongLong,
-}
-
-impl IntType {
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::I8 => "i8",
-            Self::I16 => "i16",
-            Self::I32 => "i32",
-            Self::I64 => "i64",
-            Self::U8 => "u8",
-            Self::U16 => "u16",
-            Self::U32 => "u32",
-            Self::U64 => "u64",
-            Self::Isize => "isize",
-            Self::Usize => "usize",
-            Self::CChar => "c_char",
-            Self::CSChar => "c_schar",
-            Self::CUChar => "c_uchar",
-            Self::CShort => "c_short",
-            Self::CUShort => "c_ushort",
-            Self::CInt => "c_int",
-            Self::CUInt => "c_uint",
-            Self::CLong => "c_long",
-            Self::CULong => "c_ulong",
-            Self::CLongLong => "c_longlong",
-            Self::CULongLong => "c_ulonglong",
-        }
-    }
-
-    pub(crate) fn is_unsigned(self) -> bool {
-        matches!(
-            self,
-            Self::U8
-                | Self::U16
-                | Self::U32
-                | Self::U64
-                | Self::Usize
-                | Self::CUChar
-                | Self::CUShort
-                | Self::CUInt
-                | Self::CULong
-                | Self::CULongLong
-        ) || (self == Self::CChar && std::ffi::c_char::MIN == 0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum FloatType {
-    F32,
-    F64,
-    CFloat,
-    CDouble,
-    CLongDouble,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct FunctionInfo {
-    pub name: String,
-    pub parameters: Vec<Type>,
-    pub return_type: Type,
-    pub effects: BTreeSet<Effect>,
-    pub error_type: Option<Type>,
-    pub is_extern: bool,
-    pub export_c: bool,
-    pub c_name: String,
-    pub span: Span,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct StructInfo {
-    pub fields: BTreeMap<String, Type>,
-    pub repr_c: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct EnumInfo {
-    pub variants: BTreeMap<String, Vec<Type>>,
-    pub repr_c: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SemanticModel {
-    pub expression_types: HashMap<ExprId, Type>,
-    pub try_error_types: HashMap<ExprId, Type>,
-    pub functions: BTreeMap<String, FunctionInfo>,
-    pub structs: BTreeMap<String, StructInfo>,
-    pub enums: BTreeMap<String, EnumInfo>,
-    pub opaque_types: BTreeMap<String, String>,
-    pub const_types: BTreeMap<String, Type>,
 }
 
 #[must_use]
@@ -281,30 +93,137 @@ pub fn analyze(source: SourceFile, options: &AnalyzeOptions) -> Analysis {
     let parsed = parse(&source, &lexed);
     let mut diagnostics = lexed.diagnostics.clone();
     diagnostics.extend(parsed.diagnostics);
+    for import in parsed.program.items.iter().filter_map(|item| match item {
+        Item::Import(import) => Some(import),
+        _ => None,
+    }) {
+        diagnostics.push(
+            Diagnostic::error(
+                "ALTC3401",
+                "an import requires a module loader",
+                &source.path,
+                &source.text,
+                import.span,
+            )
+            .with_help("use `analyze_project` or invoke the CLI with this file as the root"),
+        );
+    }
+    let module = crate::AnalysisModule {
+        path: crate::ModulePath::new(Vec::<String>::new()),
+        source: source.clone(),
+        cst: lexed.cst.clone(),
+    };
+    analyze_combined(
+        source.clone(),
+        lexed.cst,
+        source.clone(),
+        parsed.program,
+        diagnostics,
+        vec![module],
+        vec![ModuleSpanSource {
+            start: 0,
+            end: source.text.len(),
+            source,
+        }],
+        options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn analyze_combined(
+    root: SourceFile,
+    root_cst: SyntaxNode,
+    analyzer_source: SourceFile,
+    program: Program,
+    mut diagnostics: Vec<Diagnostic>,
+    modules: Vec<crate::AnalysisModule>,
+    span_sources: Vec<ModuleSpanSource>,
+    options: &AnalyzeOptions,
+) -> Analysis {
+    let mut analyzer_diagnostics = Vec::new();
     if let Some(target) = &options.target {
-        diagnostics.push(Diagnostic::error(
+        analyzer_diagnostics.push(Diagnostic::error(
             "ALTC4001",
             format!("cross-compilation target `{target}` is not implemented in executable v0"),
-            &source.path,
-            &source.text,
+            &analyzer_source.path,
+            &analyzer_source.text,
             Span::new(0, 0),
         ));
     }
 
-    let mut analyzer = Analyzer::new(&source, parsed.program.clone(), diagnostics);
+    let mut analyzer = Analyzer::new(&analyzer_source, program.clone(), analyzer_diagnostics);
     analyzer.validate_attributes();
     analyzer.collect_declarations();
     analyzer.validate_c_name_collisions();
     analyzer.check_program();
-    let memory_summaries = analyzer.finish_summaries();
+    let mut memory_summaries = analyzer.finish_summaries();
+    remap_memory_summaries(&mut memory_summaries, &span_sources);
+    for mut diagnostic in analyzer.diagnostics {
+        remap_diagnostic(&mut diagnostic, &span_sources);
+        diagnostics.push(diagnostic);
+    }
 
     Analysis {
-        source: source.clone(),
-        cst: lexed.cst,
-        diagnostics: analyzer.diagnostics,
+        source: root,
+        cst: root_cst,
+        diagnostics,
         memory_summaries,
-        program: parsed.program,
+        modules,
+        span_sources,
+        program,
         model: analyzer.model,
+    }
+}
+
+fn remap_memory_summaries(summaries: &mut [MemorySummary], mappings: &[ModuleSpanSource]) {
+    for summary in summaries {
+        for event in &mut summary.direct {
+            if let Some((file, span)) = source_location(event.span, mappings) {
+                event.file = file;
+                event.span = span;
+            }
+        }
+        for via in &mut summary.transitive {
+            if let Some((file, span)) = source_location(via.call_span, mappings) {
+                via.file = file;
+                via.call_span = span;
+            }
+        }
+    }
+}
+
+fn source_location(span: Span, mappings: &[ModuleSpanSource]) -> Option<(String, Span)> {
+    mappings
+        .iter()
+        .find(|mapping| span.start >= mapping.start && span.end <= mapping.end)
+        .map(|mapping| {
+            (
+                mapping.source.path.clone(),
+                Span::new(span.start - mapping.start, span.end - mapping.start),
+            )
+        })
+}
+
+fn remap_diagnostic(diagnostic: &mut Diagnostic, mappings: &[ModuleSpanSource]) {
+    let Some(mapping) = mappings.iter().find(|mapping| {
+        diagnostic.span.start >= mapping.start && diagnostic.span.end <= mapping.end
+    }) else {
+        return;
+    };
+    diagnostic.file = mapping.source.path.clone();
+    diagnostic.span = Span::new(
+        diagnostic.span.start - mapping.start,
+        diagnostic.span.end - mapping.start,
+    );
+    diagnostic.start = position(&mapping.source.text, diagnostic.span.start);
+    diagnostic.end = position(&mapping.source.text, diagnostic.span.end);
+    for label in &mut diagnostic.labels {
+        if label.span.start >= mapping.start && label.span.end <= mapping.end {
+            label.span = Span::new(
+                label.span.start - mapping.start,
+                label.span.end - mapping.start,
+            );
+        }
     }
 }
 
@@ -381,8 +300,76 @@ impl<'a> Analyzer<'a> {
                             );
                         }
                     }
+                    for global in block.globals {
+                        self.validate_attribute_list(
+                            &global.attributes,
+                            &["c_name"],
+                            "extern object",
+                        );
+                    }
+                    for declaration in block.structs {
+                        self.validate_attribute_list(
+                            &declaration.attributes,
+                            &["c_name", "c_typedef"],
+                            "extern struct",
+                        );
+                        let spelling_contracts = declaration
+                            .attributes
+                            .iter()
+                            .filter(|attribute| {
+                                matches!(attribute.name.as_str(), "c_name" | "c_typedef")
+                            })
+                            .count();
+                        if spelling_contracts != 1 {
+                            self.error(
+                                "ALTC3215",
+                                "extern struct requires exactly one `@c_name` tag or `@c_typedef` contract",
+                                declaration.span,
+                            );
+                        }
+                        for field in declaration.fields {
+                            self.validate_attribute_list(
+                                &field.attributes,
+                                &["c_name"],
+                                "extern struct field",
+                            );
+                        }
+                    }
+                    for declaration in block.enums {
+                        self.validate_attribute_list(
+                            &declaration.attributes,
+                            &["c_name", "c_typedef"],
+                            "extern enum",
+                        );
+                        let spelling_contracts = declaration
+                            .attributes
+                            .iter()
+                            .filter(|attribute| {
+                                matches!(attribute.name.as_str(), "c_name" | "c_typedef")
+                            })
+                            .count();
+                        if spelling_contracts != 1
+                            || declaration
+                                .variants
+                                .iter()
+                                .any(|variant| !variant.payload.is_empty())
+                        {
+                            self.error(
+                                "ALTC3215",
+                                "extern enum requires one spelling contract and payload-free variants",
+                                declaration.span,
+                            );
+                        }
+                        for variant in declaration.variants {
+                            self.validate_attribute_list(
+                                &variant.attributes,
+                                &["c_name"],
+                                "extern enum variant",
+                            );
+                        }
+                    }
                 }
-                Item::Const(_) | Item::Unsupported { .. } => {}
+                Item::Import(_) | Item::Const(_) | Item::Unsupported { .. } => {}
             }
         }
     }
@@ -462,7 +449,12 @@ impl<'a> Analyzer<'a> {
                         declaration.name.clone(),
                         StructInfo {
                             fields: BTreeMap::new(),
+                            field_public: BTreeMap::new(),
+                            field_c_names: BTreeMap::new(),
                             repr_c: has_repr_c(&declaration.attributes),
+                            is_extern: false,
+                            c_name: declaration.name.clone(),
+                            c_typedef: false,
                         },
                     );
                 }
@@ -472,7 +464,13 @@ impl<'a> Analyzer<'a> {
                         declaration.name.clone(),
                         EnumInfo {
                             variants: BTreeMap::new(),
+                            variant_public: BTreeMap::new(),
+                            variant_c_names: BTreeMap::new(),
                             repr_c: has_repr_c(&declaration.attributes),
+                            is_extern: false,
+                            c_name: declaration.name.clone(),
+                            c_typedef: false,
+                            span: declaration.span,
                         },
                     );
                 }
@@ -491,6 +489,41 @@ impl<'a> Analyzer<'a> {
                         self.model
                             .opaque_types
                             .insert(opaque.name.clone(), spelling);
+                    }
+                    for declaration in &block.structs {
+                        self.insert_type_name(&declaration.name, declaration.span);
+                        let (c_name, c_typedef) =
+                            extern_type_spelling(&declaration.name, &declaration.attributes);
+                        self.model.structs.insert(
+                            declaration.name.clone(),
+                            StructInfo {
+                                fields: BTreeMap::new(),
+                                field_public: BTreeMap::new(),
+                                field_c_names: BTreeMap::new(),
+                                repr_c: true,
+                                is_extern: true,
+                                c_name,
+                                c_typedef,
+                            },
+                        );
+                    }
+                    for declaration in &block.enums {
+                        self.insert_type_name(&declaration.name, declaration.span);
+                        let (c_name, c_typedef) =
+                            extern_type_spelling(&declaration.name, &declaration.attributes);
+                        self.model.enums.insert(
+                            declaration.name.clone(),
+                            EnumInfo {
+                                variants: BTreeMap::new(),
+                                variant_public: BTreeMap::new(),
+                                variant_c_names: BTreeMap::new(),
+                                repr_c: true,
+                                is_extern: true,
+                                c_name,
+                                c_typedef,
+                                span: declaration.span,
+                            },
+                        );
                     }
                 }
                 _ => {}
@@ -517,8 +550,17 @@ impl<'a> Analyzer<'a> {
                     for function in &block.functions {
                         self.collect_function(function);
                     }
+                    for declaration in &block.structs {
+                        self.collect_struct(declaration);
+                    }
+                    for declaration in &block.enums {
+                        self.collect_enum(declaration);
+                    }
+                    for global in &block.globals {
+                        self.collect_global(global);
+                    }
                 }
-                Item::Unsupported { .. } => {}
+                Item::Import(_) | Item::Unsupported { .. } => {}
             }
         }
     }
@@ -560,6 +602,31 @@ impl<'a> Analyzer<'a> {
                 );
             }
         }
+        let globals: Vec<_> = self.model.globals.values().cloned().collect();
+        for global in globals {
+            if !is_c_identifier(&global.c_name) {
+                self.error(
+                    "ALTC3213",
+                    format!(
+                        "extern object symbol `{}` is not a valid C identifier",
+                        global.c_name
+                    ),
+                    global.span,
+                );
+            }
+            if let Some(previous) = names.insert(global.c_name.clone(), global.span) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "ALTC3211",
+                        format!("duplicate C symbol `{}`", global.c_name),
+                        &self.source.path,
+                        &self.source.text,
+                        global.span,
+                    )
+                    .with_label(previous, "first declaration uses this C symbol"),
+                );
+            }
+        }
     }
 
     fn insert_type_name(&mut self, name: &str, span: Span) {
@@ -573,6 +640,8 @@ impl<'a> Analyzer<'a> {
 
     fn collect_struct(&mut self, declaration: &StructDecl) {
         let mut fields = BTreeMap::new();
+        let mut field_public = BTreeMap::new();
+        let mut field_c_names = BTreeMap::new();
         for field in &declaration.fields {
             let ty = self.resolve_type(&field.ty);
             if !ty.is_storable() {
@@ -585,14 +654,25 @@ impl<'a> Analyzer<'a> {
             if fields.insert(field.name.clone(), ty).is_some() {
                 self.duplicate("field", &field.name, field.span);
             }
+            if declaration.is_extern {
+                field_c_names.insert(
+                    field.name.clone(),
+                    attribute_spelling(&field.name, &field.attributes, "c_name"),
+                );
+            }
+            field_public.insert(field.name.clone(), field.public);
         }
         if let Some(info) = self.model.structs.get_mut(&declaration.name) {
             info.fields = fields;
+            info.field_public = field_public;
+            info.field_c_names = field_c_names;
         }
     }
 
     fn collect_enum(&mut self, declaration: &EnumDecl) {
         let mut variants = BTreeMap::new();
+        let mut variant_public = BTreeMap::new();
+        let mut variant_c_names = BTreeMap::new();
         for variant in &declaration.variants {
             let payload: Vec<_> = variant
                 .payload
@@ -609,6 +689,13 @@ impl<'a> Analyzer<'a> {
             if variants.insert(variant.name.clone(), payload).is_some() {
                 self.duplicate("variant", &variant.name, variant.span);
             }
+            if declaration.is_extern {
+                variant_c_names.insert(
+                    variant.name.clone(),
+                    attribute_spelling(&variant.name, &variant.attributes, "c_name"),
+                );
+            }
+            variant_public.insert(variant.name.clone(), variant.public);
         }
         let repr_c = has_repr_c(&declaration.attributes);
         if repr_c && variants.values().any(|payload| !payload.is_empty()) {
@@ -620,6 +707,37 @@ impl<'a> Analyzer<'a> {
         }
         if let Some(info) = self.model.enums.get_mut(&declaration.name) {
             info.variants = variants;
+            info.variant_public = variant_public;
+            info.variant_c_names = variant_c_names;
+        }
+    }
+
+    fn collect_global(&mut self, global: &ExternGlobal) {
+        let ty = self.resolve_type(&global.ty);
+        if !self.is_c_abi_safe(&ty, false) {
+            self.error(
+                "ALTC3213",
+                format!(
+                    "extern object `{}` has non-C-ABI-safe type `{}`",
+                    global.name,
+                    ty.display()
+                ),
+                global.span,
+            );
+        }
+        let info = GlobalInfo {
+            ty,
+            mutable: global.mutable,
+            c_name: attribute_spelling(&global.name, &global.attributes, "c_name"),
+            span: global.span,
+        };
+        if self
+            .model
+            .globals
+            .insert(global.name.clone(), info)
+            .is_some()
+        {
+            self.duplicate("extern object", &global.name, global.span);
         }
     }
 
@@ -675,6 +793,25 @@ impl<'a> Analyzer<'a> {
             c_name,
             span: function.span,
         };
+        for callback_effects in info
+            .parameters
+            .iter()
+            .filter_map(|parameter| match parameter {
+                Type::FunctionPointer { effects, .. } => Some(effects),
+                _ => None,
+            })
+        {
+            if info.is_extern && !callback_effects.is_subset(&info.effects) {
+                self.error(
+                    "ALTC3214",
+                    format!(
+                        "extern function `{}` must declare every effect allowed by its callback parameter",
+                        info.name
+                    ),
+                    function.span,
+                );
+            }
+        }
         if self
             .model
             .functions
@@ -769,15 +906,13 @@ impl<'a> Analyzer<'a> {
         let dependencies: Vec<String> = if let Some(info) = self.model.structs.get(current) {
             info.fields
                 .values()
-                .filter_map(by_value_named_type)
-                .map(str::to_owned)
+                .flat_map(by_value_named_types)
                 .collect()
         } else if let Some(info) = self.model.enums.get(current) {
             info.variants
                 .values()
                 .flatten()
-                .filter_map(by_value_named_type)
-                .map(str::to_owned)
+                .flat_map(by_value_named_types)
                 .collect()
         } else {
             Vec::new()
@@ -818,10 +953,15 @@ impl<'a> Analyzer<'a> {
                 || function.export_c
                 || info.error_type.is_some()
             {
-                self.error(
-                    "ALTC3202",
-                    "`@entry` must be private, non-exported, parameterless, return `c_int`, and not raise",
-                    function.span,
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "ALTC3202",
+                        "`@entry` must be private, non-exported, parameterless, return `c_int`, and not raise",
+                        &self.source.path,
+                        &self.source.text,
+                        function.span,
+                    )
+                    .with_help("declare it as `@entry fn name() -> c_int` and handle typed errors inside the function"),
                 );
             }
         }
@@ -893,9 +1033,26 @@ impl<'a> Analyzer<'a> {
                 Type::Enum(name) => self.model.enums.get(name).is_some_and(|info| info.repr_c),
                 _ => false,
             },
+            Type::FunctionPointer {
+                extern_c,
+                parameters,
+                return_type,
+                error_type,
+                ..
+            } => {
+                *extern_c
+                    && error_type.is_none()
+                    && parameters.iter().all(|ty| self.is_c_abi_safe(ty, false))
+                    && self.is_c_abi_safe(return_type, true)
+            }
             Type::Struct(name) => self.model.structs.get(name).is_some_and(|info| info.repr_c),
             Type::Enum(name) => self.model.enums.get(name).is_some_and(|info| info.repr_c),
-            Type::Str | Type::Opaque(_) | Type::Never | Type::Unknown => false,
+            Type::Array { .. }
+            | Type::Slice { .. }
+            | Type::Str
+            | Type::Opaque(_)
+            | Type::Never
+            | Type::Unknown => false,
         }
     }
 
@@ -928,14 +1085,21 @@ impl<'a> Analyzer<'a> {
 
         for effect in &actual_effects {
             if !info.effects.contains(effect) {
-                self.error(
-                    "ALTC3103",
-                    format!(
-                        "function `{}` performs undeclared effect `{}`",
-                        function.name,
-                        effect_name(effect)
-                    ),
-                    function.span,
+                let effect = effect_name(effect);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "ALTC3103",
+                        format!(
+                            "function `{}` performs undeclared effect `{effect}`",
+                            function.name,
+                        ),
+                        &self.source.path,
+                        &self.source.text,
+                        function.span,
+                    )
+                    .with_help(format!(
+                        "add `{effect}` to this function's `with {{ ... }}` contract"
+                    )),
                 );
             }
         }
@@ -944,7 +1108,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn resolve_type(&mut self, reference: &TypeRef) -> Type {
-        match reference {
+        if let Some(ty) = self.model.type_references.get(&reference.span()) {
+            return ty.clone();
+        }
+        let ty = match reference {
             TypeRef::Named { path, span } => {
                 if path.len() != 1 {
                     self.error(
@@ -952,27 +1119,39 @@ impl<'a> Analyzer<'a> {
                         "module-qualified types require multi-module support",
                         *span,
                     );
-                    return Type::Unknown;
+                    Type::Unknown
+                } else {
+                    let name = &path[0];
+                    primitive_type(name)
+                        .or_else(|| {
+                            self.model
+                                .structs
+                                .contains_key(name)
+                                .then(|| Type::Struct(name.clone()))
+                        })
+                        .or_else(|| {
+                            self.model
+                                .enums
+                                .contains_key(name)
+                                .then(|| Type::Enum(name.clone()))
+                        })
+                        .or_else(|| self.model.opaque_types.get(name).cloned().map(Type::Opaque))
+                        .unwrap_or_else(|| {
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    "ALTC3005",
+                                    format!("unknown type `{name}`"),
+                                    &self.source.path,
+                                    &self.source.text,
+                                    *span,
+                                )
+                                .with_help(
+                                    "declare the type or replace it with an implemented concrete type",
+                                ),
+                            );
+                            Type::Unknown
+                        })
                 }
-                let name = &path[0];
-                primitive_type(name)
-                    .or_else(|| {
-                        self.model
-                            .structs
-                            .contains_key(name)
-                            .then(|| Type::Struct(name.clone()))
-                    })
-                    .or_else(|| {
-                        self.model
-                            .enums
-                            .contains_key(name)
-                            .then(|| Type::Enum(name.clone()))
-                    })
-                    .or_else(|| self.model.opaque_types.get(name).cloned().map(Type::Opaque))
-                    .unwrap_or_else(|| {
-                        self.error("ALTC3005", format!("unknown type `{name}`"), *span);
-                        Type::Unknown
-                    })
             }
             TypeRef::Pointer {
                 nullable,
@@ -984,7 +1163,154 @@ impl<'a> Analyzer<'a> {
                 mutable: *mutable,
                 pointee: Box::new(self.resolve_type(pointee)),
             },
+            TypeRef::Array {
+                element,
+                length,
+                span,
+            } => {
+                let element = self.resolve_type(element);
+                let length_value = self.const_usize(length, &mut BTreeSet::new());
+                let length = length_value.filter(|length| *length > 0).unwrap_or_else(|| {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "ALTC3051",
+                            "array length must be a positive compile-time `usize` value",
+                            &self.source.path,
+                            &self.source.text,
+                            length.span,
+                        )
+                        .with_help("use a `usize` constant greater than zero, or use a slice for an empty sequence"),
+                    );
+                    1
+                });
+                if !element.is_storable() {
+                    self.error("ALTC3051", "array element type must be storable", *span);
+                }
+                Type::Array {
+                    element: Box::new(element),
+                    length,
+                }
+            }
+            TypeRef::Slice {
+                mutable, element, ..
+            } => {
+                let element = self.resolve_type(element);
+                if !element.is_storable() {
+                    self.error(
+                        "ALTC3051",
+                        "slice element type must be storable",
+                        reference.span(),
+                    );
+                }
+                Type::Slice {
+                    mutable: *mutable,
+                    element: Box::new(element),
+                }
+            }
+            TypeRef::FunctionPointer {
+                extern_c,
+                parameters,
+                return_type,
+                effects,
+                span,
+            } => {
+                let parameters = parameters
+                    .iter()
+                    .map(|parameter| self.resolve_type(parameter))
+                    .collect();
+                let return_type = Box::new(self.resolve_type(return_type));
+                let mut resolved_effects = BTreeSet::new();
+                let mut error_type = None;
+                for effect in effects {
+                    let effect = match effect {
+                        EffectRef::Alloc(_) => Effect::Alloc,
+                        EffectRef::Free(_) => Effect::Free,
+                        EffectRef::Raise(error, _) => {
+                            let error = self.resolve_type(error);
+                            error_type = Some(Box::new(error.clone()));
+                            Effect::Raise(error.display())
+                        }
+                    };
+                    resolved_effects.insert(effect);
+                }
+                if *extern_c && error_type.is_some() {
+                    self.error(
+                        "ALTC3214",
+                        "an `extern \"C\"` callback type cannot carry a `raise` effect",
+                        *span,
+                    );
+                }
+                Type::FunctionPointer {
+                    extern_c: *extern_c,
+                    parameters,
+                    return_type,
+                    effects: resolved_effects,
+                    error_type,
+                }
+            }
             TypeRef::Unsupported { .. } => Type::Unknown,
+        };
+        self.model
+            .type_references
+            .insert(reference.span(), ty.clone());
+        ty
+    }
+
+    fn const_usize(&self, expression: &Expr, visiting: &mut BTreeSet<String>) -> Option<usize> {
+        match &expression.kind {
+            ExprKind::Literal(Literal::Int(raw)) => {
+                let (value, suffix) = parse_integer(raw).ok()?;
+                if suffix.is_some_and(|suffix| suffix != "usize") {
+                    return None;
+                }
+                usize::try_from(value).ok()
+            }
+            ExprKind::Path(path) if path.len() == 1 => {
+                let name = &path[0];
+                if !visiting.insert(name.clone()) {
+                    return None;
+                }
+                let declaration = self.program.items.iter().find_map(|item| match item {
+                    Item::Const(declaration) if declaration.name == *name => {
+                        Some(declaration.clone())
+                    }
+                    _ => None,
+                })?;
+                let is_usize = matches!(
+                    &declaration.ty,
+                    TypeRef::Named { path, .. } if path.as_slice() == ["usize"]
+                );
+                let value = is_usize
+                    .then(|| self.const_usize(&declaration.value, visiting))
+                    .flatten();
+                visiting.remove(name);
+                value
+            }
+            ExprKind::Unary {
+                operator: UnaryOp::Plus,
+                value,
+            } => self.const_usize(value, visiting),
+            ExprKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left = self.const_usize(left, visiting)?;
+                let right = self.const_usize(right, visiting)?;
+                match operator {
+                    BinaryOp::Add => left.checked_add(right),
+                    BinaryOp::Subtract => left.checked_sub(right),
+                    BinaryOp::Multiply => left.checked_mul(right),
+                    BinaryOp::Divide => left.checked_div(right),
+                    BinaryOp::Remainder => left.checked_rem(right),
+                    _ => None,
+                }
+            }
+            ExprKind::Cast {
+                value,
+                ty: TypeRef::Named { path, .. },
+            } if path.as_slice() == ["usize"] => self.const_usize(value, visiting),
+            _ => None,
         }
     }
 
@@ -1027,6 +1353,7 @@ impl<'a> Analyzer<'a> {
                             transitive.push(MemoryVia {
                                 category: *category,
                                 callee: callee.clone(),
+                                file: String::new(),
                                 call_span: *call_span,
                             });
                         }
@@ -1071,6 +1398,7 @@ impl<'a> Analyzer<'a> {
 struct Binding {
     ty: Type,
     mutable: bool,
+    span: Span,
 }
 
 struct BodyChecker<'a, 'b> {
@@ -1165,7 +1493,7 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
     fn check_expr(&mut self, expression: &Expr, expected: Option<&Type>) -> Type {
         let ty = match &expression.kind {
             ExprKind::Literal(literal) => self.check_literal(literal, expected, expression.span),
-            ExprKind::Path(path) => self.check_path(path, expression.span),
+            ExprKind::Path(path) => self.check_path(path, expected, expression.span),
             ExprKind::Block(block) => self.check_block(block, expected),
             ExprKind::If {
                 condition,
@@ -1260,6 +1588,40 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 self.expect_same(&Type::Unit, &body_type, body.span);
                 Type::Unit
             }
+            ExprKind::RangeFor {
+                binding,
+                binding_span,
+                sequence,
+                body,
+            } => {
+                let sequence_type = self.check_expr(sequence, None);
+                let element = match sequence_type {
+                    Type::Array { element, .. } => *element,
+                    Type::Slice { element, .. } => {
+                        self.memory_current(MemoryCategory::IndirectRead, sequence.span);
+                        *element
+                    }
+                    other => {
+                        self.analyzer.error(
+                            "ALTC3054",
+                            format!(
+                                "range-for requires an array or slice, found `{}`",
+                                other.display()
+                            ),
+                            sequence.span,
+                        );
+                        Type::Unknown
+                    }
+                };
+                self.push_scope();
+                self.bind(binding.clone(), element, false, *binding_span);
+                self.loop_depth += 1;
+                let body_type = self.check_block(body, Some(&Type::Unit));
+                self.loop_depth -= 1;
+                self.pop_scope();
+                self.expect_same(&Type::Unit, &body_type, body.span);
+                Type::Unit
+            }
             ExprKind::Call { callee, arguments } => {
                 self.check_call(callee, arguments, false, expression.span)
             }
@@ -1273,6 +1635,10 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             } => {
                 self.check_field(base, name, *pointer, false, expression.span)
                     .0
+            }
+            ExprKind::Index { base, index } => self.check_index(base, index, expression.span),
+            ExprKind::Slice { base, start, end } => {
+                self.check_slice(base, start.as_deref(), end.as_deref(), expression.span)
             }
             ExprKind::Propagate(value) => {
                 if self.in_defer {
@@ -1330,11 +1696,30 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     .expression_types
                     .insert(target.id, target_type.clone());
                 if !mutable {
-                    self.analyzer.error(
+                    let mut diagnostic = Diagnostic::error(
                         "ALTC3008",
                         "assignment target is not mutable",
+                        &self.analyzer.source.path,
+                        &self.analyzer.source.text,
                         target.span,
+                    )
+                    .with_help(
+                        "add `mut` to the binding declaration or assign through a mutable pointer",
                     );
+                    if let Some(binding) = self.binding_for_place(target) {
+                        diagnostic =
+                            diagnostic.with_label(binding.span, "binding declared immutable here");
+                    } else if let ExprKind::Path(path) = &target.kind {
+                        if path.len() == 1 {
+                            if let Some(global) = self.analyzer.model.globals.get(&path[0]) {
+                                diagnostic = diagnostic.with_label(
+                                    global.span,
+                                    "extern object declared read-only here",
+                                );
+                            }
+                        }
+                    }
+                    self.analyzer.diagnostics.push(diagnostic);
                 }
                 let value_type = self.check_expr(value, Some(&target_type));
                 self.expect_same(&target_type, &value_type, value.span);
@@ -1360,6 +1745,9 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             }
             ExprKind::StructLiteral { path, fields } => {
                 self.check_struct_literal(path, fields, expression.span)
+            }
+            ExprKind::ArrayLiteral(values) => {
+                self.check_array_literal(values, expected, expression.span)
             }
             ExprKind::Raise(value) => {
                 if self.in_defer {
@@ -1520,7 +1908,7 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         ty
     }
 
-    fn check_path(&mut self, path: &[String], span: Span) -> Type {
+    fn check_path(&mut self, path: &[String], expected: Option<&Type>, span: Span) -> Type {
         if path.len() == 1 {
             if let Some(binding) = self.lookup(&path[0]) {
                 return binding.ty.clone();
@@ -1528,17 +1916,77 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             if let Some(ty) = self.analyzer.model.const_types.get(&path[0]) {
                 return ty.clone();
             }
-            if self.analyzer.model.functions.contains_key(&path[0]) {
+            if let Some(global) = self.analyzer.model.globals.get(&path[0]).cloned() {
+                self.memory_current(MemoryCategory::GlobalRead, span);
+                return global.ty;
+            }
+            if let Some(function) = self.analyzer.model.functions.get(&path[0]).cloned() {
+                if let Some(Type::FunctionPointer {
+                    extern_c,
+                    parameters,
+                    return_type,
+                    effects,
+                    error_type,
+                }) = expected
+                {
+                    let expected_type = Type::FunctionPointer {
+                        extern_c: *extern_c,
+                        parameters: parameters.clone(),
+                        return_type: return_type.clone(),
+                        effects: effects.clone(),
+                        error_type: error_type.clone(),
+                    };
+                    let actual_type = Type::FunctionPointer {
+                        extern_c: *extern_c,
+                        parameters: function.parameters.clone(),
+                        return_type: Box::new(function.return_type.clone()),
+                        effects: function.effects.clone(),
+                        error_type: function.error_type.clone().map(Box::new),
+                    };
+                    if *extern_c && function.error_type.is_some() {
+                        self.analyzer.error(
+                            "ALTC3214",
+                            format!(
+                                "raising function `{}` cannot be used as a C callback",
+                                function.name
+                            ),
+                            span,
+                        );
+                    } else if !types_compatible(&expected_type, &actual_type) {
+                        self.analyzer.error(
+                            "ALTC3214",
+                            format!(
+                                "function `{}` does not match the expected callback signature",
+                                function.name
+                            ),
+                            span,
+                        );
+                    }
+                    return expected_type;
+                }
                 self.analyzer.error(
                     "ALTC3011",
-                    "function values require function-pointer support; call the function directly",
+                    "a function value needs a function-pointer type from its surrounding context",
                     span,
                 );
                 return Type::Unknown;
             }
         } else if let Some((enum_name, variant_name)) = split_variant(path) {
-            if let Some(info) = self.analyzer.model.enums.get(enum_name) {
+            if let Some(info) = self.analyzer.model.enums.get(enum_name).cloned() {
                 if let Some(payload) = info.variants.get(variant_name) {
+                    if !self.member_visible(
+                        enum_name,
+                        info.variant_public
+                            .get(variant_name)
+                            .copied()
+                            .unwrap_or(false),
+                    ) {
+                        self.analyzer.error(
+                            "ALTC3404",
+                            format!("enum variant `{variant_name}` is private"),
+                            span,
+                        );
+                    }
                     if payload.is_empty() {
                         return Type::Enum(enum_name.to_owned());
                     }
@@ -1576,22 +2024,39 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 span,
             );
         }
+        if let ExprKind::Field {
+            base,
+            name,
+            pointer: false,
+        } = &callee.kind
+        {
+            if name == "get" {
+                if propagate {
+                    self.analyzer
+                        .error("ALTC3105", "postfix `?` requires a raising call", span);
+                }
+                return self.check_get(base, arguments, span);
+            }
+        }
         let (path, type_arguments): (&[String], &[TypeRef]) = match &callee.kind {
             ExprKind::Path(path) => (path, &[]),
             ExprKind::TypeApply { path, arguments } => (path, arguments),
-            _ => {
-                self.analyzer.error(
-                    "ALTC3015",
-                    "indirect calls require function-pointer support",
-                    callee.span,
-                );
-                for argument in arguments {
-                    self.check_expr(argument, None);
-                }
-                return Type::Unknown;
-            }
+            _ => return self.check_indirect_call(callee, arguments, propagate, span),
         };
         if path.len() == 1 {
+            let indirect = self
+                .lookup(&path[0])
+                .map(|binding| binding.ty.clone())
+                .or_else(|| {
+                    self.analyzer
+                        .model
+                        .globals
+                        .get(&path[0])
+                        .map(|global| global.ty.clone())
+                });
+            if matches!(indirect, Some(Type::FunctionPointer { .. })) {
+                return self.check_indirect_call(callee, arguments, propagate, span);
+            }
             if let Some(result) = self.check_builtin(&path[0], type_arguments, arguments, span) {
                 if propagate {
                     self.analyzer
@@ -1637,10 +2102,18 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 }
                 match (&info.error_type, propagate) {
                     (Some(error), true) => self.route_error(error.clone(), span),
-                    (Some(_), false) => self.analyzer.error(
-                        "ALTC3106",
-                        format!("raising call to `{}` requires postfix `?`", info.name),
-                        span,
+                    (Some(_), false) => self.analyzer.diagnostics.push(
+                        Diagnostic::error(
+                            "ALTC3106",
+                            format!("raising call to `{}` requires postfix `?`", info.name),
+                            &self.analyzer.source.path,
+                            &self.analyzer.source.text,
+                            span,
+                        )
+                        .with_label(info.span, "raising function declared here")
+                        .with_help(
+                            "append `?` to propagate the error, or handle it with `try ... catch`",
+                        ),
                     ),
                     (None, true) => {
                         self.analyzer
@@ -1654,6 +2127,19 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         if let Some((enum_name, variant_name)) = split_variant(path) {
             if let Some(info) = self.analyzer.model.enums.get(enum_name).cloned() {
                 if let Some(payload) = info.variants.get(variant_name) {
+                    if !self.member_visible(
+                        enum_name,
+                        info.variant_public
+                            .get(variant_name)
+                            .copied()
+                            .unwrap_or(false),
+                    ) {
+                        self.analyzer.error(
+                            "ALTC3404",
+                            format!("enum variant `{variant_name}` is private"),
+                            span,
+                        );
+                    }
                     let payload = payload.clone();
                     if payload.len() != arguments.len() {
                         self.analyzer.error(
@@ -1679,6 +2165,74 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             span,
         );
         Type::Unknown
+    }
+
+    fn check_indirect_call(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Expr],
+        propagate: bool,
+        span: Span,
+    ) -> Type {
+        let callee_type = self.check_expr(callee, None);
+        let Type::FunctionPointer {
+            parameters,
+            return_type,
+            effects,
+            error_type,
+            ..
+        } = callee_type
+        else {
+            self.analyzer.error(
+                "ALTC3015",
+                "called expression is not a function pointer",
+                callee.span,
+            );
+            for argument in arguments {
+                self.check_expr(argument, None);
+            }
+            return Type::Unknown;
+        };
+        if parameters.len() != arguments.len() {
+            self.analyzer.error(
+                "ALTC3016",
+                format!(
+                    "function pointer expects {} argument(s), found {}",
+                    parameters.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+        }
+        for (argument, expected) in arguments.iter().zip(&parameters) {
+            let actual = self.check_expr(argument, Some(expected));
+            self.expect_same(expected, &actual, argument.span);
+        }
+        for effect in &effects {
+            if !matches!(effect, Effect::Raise(_)) {
+                self.actual_effects.insert(effect.clone());
+            }
+        }
+        self.memory_current(MemoryCategory::IndirectCall, span);
+        match (error_type, propagate) {
+            (Some(error), true) => self.route_error(*error, span),
+            (Some(_), false) => self.analyzer.diagnostics.push(
+                Diagnostic::error(
+                    "ALTC3106",
+                    "raising indirect call requires postfix `?`",
+                    &self.analyzer.source.path,
+                    &self.analyzer.source.text,
+                    span,
+                )
+                .with_help("append `?` to propagate the error, or handle it with `try ... catch`"),
+            ),
+            (None, true) => {
+                self.analyzer
+                    .error("ALTC3105", "postfix `?` requires a raising call", span);
+            }
+            (None, false) => {}
+        }
+        *return_type
     }
 
     fn check_type_apply(&mut self, path: &[String], arguments: &[TypeRef], span: Span) -> Type {
@@ -1717,10 +2271,15 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         match name {
             "ptr_as_const" => {
                 if !type_arguments.is_empty() || arguments.len() != 1 {
-                    self.analyzer.error(
-                        "ALTC3019",
-                        "`ptr_as_const` expects no type arguments and one value argument",
-                        span,
+                    self.analyzer.diagnostics.push(
+                        Diagnostic::error(
+                            "ALTC3019",
+                            "`ptr_as_const` expects no type arguments and one value argument",
+                            &self.analyzer.source.path,
+                            &self.analyzer.source.text,
+                            span,
+                        )
+                        .with_help("call it as `ptr_as_const(pointer)` without `[Type]`"),
                     );
                 }
                 let Some(argument) = arguments.first() else {
@@ -1750,10 +2309,15 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             }
             "ptr_addr" => {
                 if !type_arguments.is_empty() || arguments.len() != 1 {
-                    self.analyzer.error(
-                        "ALTC3019",
-                        "`ptr_addr` expects no type arguments and one value argument",
-                        span,
+                    self.analyzer.diagnostics.push(
+                        Diagnostic::error(
+                            "ALTC3019",
+                            "`ptr_addr` expects no type arguments and one value argument",
+                            &self.analyzer.source.path,
+                            &self.analyzer.source.text,
+                            span,
+                        )
+                        .with_help("call it as `ptr_addr(pointer)` without `[Type]`"),
                     );
                 }
                 let argument_type = arguments
@@ -1853,6 +2417,86 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     pointee: Box::new(pointee),
                 })
             }
+            "slice_from_parts" => {
+                if type_arguments.len() != 1 || arguments.len() != 2 {
+                    self.analyzer.error(
+                        "ALTC3019",
+                        "`slice_from_parts[T]` expects one pointer and one length argument",
+                        span,
+                    );
+                    return Some(Type::Unknown);
+                }
+                let element = self.analyzer.resolve_type(&type_arguments[0]);
+                let pointer = self.check_expr(&arguments[0], None);
+                let length = self.check_expr(&arguments[1], Some(&Type::Int(IntType::Usize)));
+                self.expect_same(&Type::Int(IntType::Usize), &length, arguments[1].span);
+                match pointer {
+                    Type::Pointer {
+                        nullable: false,
+                        mutable,
+                        pointee,
+                    } => {
+                        self.expect_same(&element, &pointee, arguments[0].span);
+                        Some(Type::Slice {
+                            mutable,
+                            element: Box::new(element),
+                        })
+                    }
+                    other => {
+                        self.analyzer.error(
+                            "ALTC3054",
+                            format!(
+                                "`slice_from_parts` requires a non-null pointer, found `{}`",
+                                other.display()
+                            ),
+                            arguments[0].span,
+                        );
+                        Some(Type::Unknown)
+                    }
+                }
+            }
+            "empty_slice" | "empty_slice_mut" => {
+                if type_arguments.len() != 1 || !arguments.is_empty() {
+                    self.analyzer.error(
+                        "ALTC3019",
+                        format!("`{name}[T]` expects one type argument and no values"),
+                        span,
+                    );
+                    return Some(Type::Unknown);
+                }
+                let element = self.analyzer.resolve_type(&type_arguments[0]);
+                Some(Type::Slice {
+                    mutable: name == "empty_slice_mut",
+                    element: Box::new(element),
+                })
+            }
+            "slice_as_const" => {
+                if !type_arguments.is_empty() || arguments.len() != 1 {
+                    self.analyzer.error(
+                        "ALTC3019",
+                        "`slice_as_const` expects one slice and no type arguments",
+                        span,
+                    );
+                    return Some(Type::Unknown);
+                }
+                match self.check_expr(&arguments[0], None) {
+                    Type::Slice { element, .. } => Some(Type::Slice {
+                        mutable: false,
+                        element,
+                    }),
+                    other => {
+                        self.analyzer.error(
+                            "ALTC3054",
+                            format!(
+                                "`slice_as_const` requires a slice, found `{}`",
+                                other.display()
+                            ),
+                            arguments[0].span,
+                        );
+                        Some(Type::Unknown)
+                    }
+                }
+            }
             _ => None,
         }
     }
@@ -1885,11 +2529,23 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                         *pointee
                     }
                     Type::Pointer { nullable: true, .. } => {
-                        self.analyzer.error(
+                        let mut diagnostic = Diagnostic::error(
                             "ALTC3021",
                             "nullable pointers must be refined with `nonnull(...)` before dereference",
+                            &self.analyzer.source.path,
+                            &self.analyzer.source.text,
                             span,
-                        );
+                        )
+                        .with_help("match the pointer with `nonnull(value)` and `null` before dereferencing it");
+                        if let ExprKind::Path(path) = &value.kind {
+                            if path.len() == 1 {
+                                if let Some(binding) = self.lookup(&path[0]) {
+                                    diagnostic = diagnostic
+                                        .with_label(binding.span, "nullable pointer declared here");
+                                }
+                            }
+                        }
+                        self.analyzer.diagnostics.push(diagnostic);
                         Type::Unknown
                     }
                     other => {
@@ -2064,6 +2720,16 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     .duplicate("field initializer", &field.name, field.span);
             }
             if let Some(expected) = info.fields.get(&field.name) {
+                if !self.member_visible(
+                    name,
+                    info.field_public.get(&field.name).copied().unwrap_or(false),
+                ) {
+                    self.analyzer.error(
+                        "ALTC3404",
+                        format!("struct field `{}` is private", field.name),
+                        field.span,
+                    );
+                }
                 let actual = self.check_expr(&field.value, Some(expected));
                 self.expect_same(expected, &actual, field.value.span);
             } else {
@@ -2084,6 +2750,213 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             }
         }
         Type::Struct(name.clone())
+    }
+
+    fn check_array_literal(
+        &mut self,
+        values: &[Expr],
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Type {
+        let expected_array = expected.and_then(|ty| match ty {
+            Type::Array { element, length } => Some((element.as_ref().clone(), *length)),
+            _ => None,
+        });
+        if values.is_empty() {
+            self.analyzer.diagnostics.push(
+                Diagnostic::error(
+                    "ALTC3052",
+                    "array literals must contain at least one element",
+                    &self.analyzer.source.path,
+                    &self.analyzer.source.text,
+                    span,
+                )
+                .with_help("use `empty_slice[T]()` when an empty sequence is required"),
+            );
+            return expected.cloned().unwrap_or(Type::Unknown);
+        }
+        let element = if let Some((element, _)) = &expected_array {
+            element.clone()
+        } else {
+            self.check_expr(&values[0], None)
+        };
+        for (index, value) in values.iter().enumerate() {
+            if index == 0 && expected_array.is_none() {
+                continue;
+            }
+            let actual = self.check_expr(value, Some(&element));
+            self.expect_same(&element, &actual, value.span);
+        }
+        if let Some((_, length)) = expected_array {
+            if values.len() != length {
+                self.analyzer.diagnostics.push(
+                    Diagnostic::error(
+                        "ALTC3052",
+                        format!(
+                            "array literal has {} element(s), but the expected array has length {length}",
+                            values.len()
+                        ),
+                        &self.analyzer.source.path,
+                        &self.analyzer.source.text,
+                        span,
+                    )
+                    .with_help(format!("provide exactly {length} element(s)")),
+                );
+            }
+            Type::Array {
+                element: Box::new(element),
+                length,
+            }
+        } else {
+            Type::Array {
+                element: Box::new(element),
+                length: values.len(),
+            }
+        }
+    }
+
+    fn check_index(&mut self, base: &Expr, index: &Expr, span: Span) -> Type {
+        let base_type = self.check_expr(base, None);
+        let index_type = self.check_expr(index, Some(&Type::Int(IntType::Usize)));
+        self.expect_same(&Type::Int(IntType::Usize), &index_type, index.span);
+        match base_type {
+            Type::Array { element, length } => {
+                if self
+                    .analyzer
+                    .const_usize(index, &mut BTreeSet::new())
+                    .is_some_and(|index| index >= length)
+                {
+                    self.analyzer.diagnostics.push(
+                        Diagnostic::error(
+                            "ALTC3053",
+                            format!("array index is outside the known length {length}"),
+                            &self.analyzer.source.path,
+                            &self.analyzer.source.text,
+                            index.span,
+                        )
+                        .with_help(format!("use an index from 0 through {}", length - 1)),
+                    );
+                }
+                *element
+            }
+            Type::Slice { element, .. } => {
+                self.memory_current(MemoryCategory::IndirectRead, span);
+                *element
+            }
+            other => {
+                self.analyzer.error(
+                    "ALTC3054",
+                    format!(
+                        "indexing requires an array or slice, found `{}`",
+                        other.display()
+                    ),
+                    base.span,
+                );
+                Type::Unknown
+            }
+        }
+    }
+
+    fn check_slice(
+        &mut self,
+        base: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        span: Span,
+    ) -> Type {
+        let base_type = self.check_expr(base, None);
+        let (_, place_mutable) = self.check_place(base, false);
+        for bound in [start, end].into_iter().flatten() {
+            let ty = self.check_expr(bound, Some(&Type::Int(IntType::Usize)));
+            self.expect_same(&Type::Int(IntType::Usize), &ty, bound.span);
+        }
+        let start_value = match start {
+            Some(value) => self.analyzer.const_usize(value, &mut BTreeSet::new()),
+            None => Some(0),
+        };
+        let explicit_end =
+            end.and_then(|value| self.analyzer.const_usize(value, &mut BTreeSet::new()));
+        let (element, mutable, known_length) = match base_type {
+            Type::Array { element, length } => (*element, place_mutable, Some(length)),
+            Type::Slice { mutable, element } => (*element, mutable, None),
+            other => {
+                self.analyzer.error(
+                    "ALTC3054",
+                    format!(
+                        "slicing requires an array or slice, found `{}`",
+                        other.display()
+                    ),
+                    base.span,
+                );
+                return Type::Unknown;
+            }
+        };
+        let end_value = explicit_end.or(known_length);
+        if start_value
+            .zip(end_value)
+            .is_some_and(|(start, end)| start > end)
+            || known_length
+                .zip(end_value)
+                .is_some_and(|(length, end)| end > length)
+        {
+            self.analyzer.diagnostics.push(
+                Diagnostic::error(
+                    "ALTC3053",
+                    "slice range is outside the statically known bounds",
+                    &self.analyzer.source.path,
+                    &self.analyzer.source.text,
+                    span,
+                )
+                .with_help("use a half-open range satisfying `start <= end <= base.len`"),
+            );
+        }
+        Type::Slice {
+            mutable,
+            element: Box::new(element),
+        }
+    }
+
+    fn check_get(&mut self, base: &Expr, arguments: &[Expr], span: Span) -> Type {
+        if arguments.len() != 1 {
+            self.analyzer.error(
+                "ALTC3016",
+                format!(
+                    "`get` expects one index argument, found {}",
+                    arguments.len()
+                ),
+                span,
+            );
+        }
+        let index = arguments.first();
+        if let Some(index) = index {
+            let ty = self.check_expr(index, Some(&Type::Int(IntType::Usize)));
+            self.expect_same(&Type::Int(IntType::Usize), &ty, index.span);
+        }
+        let base_type = self.check_expr(base, None);
+        let (_, place_mutable) = self.check_place(base, false);
+        match base_type {
+            Type::Array { element, .. } => Type::Pointer {
+                nullable: true,
+                mutable: place_mutable,
+                pointee: element,
+            },
+            Type::Slice { mutable, element } => Type::Pointer {
+                nullable: true,
+                mutable,
+                pointee: element,
+            },
+            other => {
+                self.analyzer.error(
+                    "ALTC3054",
+                    format!(
+                        "`get` requires an array or slice, found `{}`",
+                        other.display()
+                    ),
+                    base.span,
+                );
+                Type::Unknown
+            }
+        }
     }
 
     fn check_field(
@@ -2113,11 +2986,23 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     (*pointee, mutable)
                 }
                 Type::Pointer { nullable: true, .. } => {
-                    self.analyzer.error(
+                    let mut diagnostic = Diagnostic::error(
                         "ALTC3021",
                         "nullable pointer field access requires refinement",
+                        &self.analyzer.source.path,
+                        &self.analyzer.source.text,
                         span,
-                    );
+                    )
+                    .with_help("match the pointer with `nonnull(value)` and `null` before accessing its fields");
+                    if let ExprKind::Path(path) = &base.kind {
+                        if path.len() == 1 {
+                            if let Some(binding) = self.lookup(&path[0]) {
+                                diagnostic = diagnostic
+                                    .with_label(binding.span, "nullable pointer declared here");
+                            }
+                        }
+                    }
+                    self.analyzer.diagnostics.push(diagnostic);
                     return (Type::Unknown, false);
                 }
                 other => {
@@ -2135,6 +3020,18 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         };
         match aggregate {
             Type::Struct(struct_name) => {
+                if let Some(info) = self.analyzer.model.structs.get(&struct_name) {
+                    if !self.member_visible(
+                        &struct_name,
+                        info.field_public.get(name).copied().unwrap_or(false),
+                    ) {
+                        self.analyzer.error(
+                            "ALTC3404",
+                            format!("struct field `{name}` is private"),
+                            span,
+                        );
+                    }
+                }
                 let ty = self
                     .analyzer
                     .model
@@ -2154,6 +3051,9 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 }
             }
             Type::Str if name == "byte_len" => (Type::Int(IntType::Usize), false),
+            Type::Array { .. } | Type::Slice { .. } if name == "len" => {
+                (Type::Int(IntType::Usize), false)
+            }
             other => {
                 self.analyzer.error(
                     "ALTC3033",
@@ -2172,6 +3072,11 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     (binding.ty, binding.mutable)
                 } else if let Some(ty) = self.analyzer.model.const_types.get(&path[0]).cloned() {
                     (ty, false)
+                } else if let Some(global) = self.analyzer.model.globals.get(&path[0]).cloned() {
+                    if write {
+                        self.memory_current(MemoryCategory::GlobalWrite, expression.span);
+                    }
+                    (global.ty, global.mutable)
                 } else {
                     self.analyzer
                         .error("ALTC3013", "unknown assignment target", expression.span);
@@ -2209,6 +3114,50 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 name,
                 pointer,
             } => self.check_field(base, name, *pointer, write, expression.span),
+            ExprKind::Index { base, index } => {
+                let base_type = self.check_expr(base, None);
+                let index_type = self.check_expr(index, Some(&Type::Int(IntType::Usize)));
+                self.expect_same(&Type::Int(IntType::Usize), &index_type, index.span);
+                match base_type {
+                    Type::Array { element, length } => {
+                        if self
+                            .analyzer
+                            .const_usize(index, &mut BTreeSet::new())
+                            .is_some_and(|index| index >= length)
+                        {
+                            self.analyzer.error(
+                                "ALTC3053",
+                                format!("array index is outside the known length {length}"),
+                                index.span,
+                            );
+                        }
+                        let mutable = self.check_place(base, false).1;
+                        (*element, mutable)
+                    }
+                    Type::Slice { mutable, element } => {
+                        self.memory_current(
+                            if write {
+                                MemoryCategory::IndirectWrite
+                            } else {
+                                MemoryCategory::IndirectRead
+                            },
+                            expression.span,
+                        );
+                        (*element, mutable)
+                    }
+                    other => {
+                        self.analyzer.error(
+                            "ALTC3054",
+                            format!(
+                                "indexing requires an array or slice, found `{}`",
+                                other.display()
+                            ),
+                            base.span,
+                        );
+                        (Type::Unknown, false)
+                    }
+                }
+            }
             _ => {
                 let ty = self.check_expr(expression, None);
                 self.analyzer.error(
@@ -2251,8 +3200,24 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
             self.pop_scope();
         }
         if !covers_all && !self.is_exhaustive(value_type, &covered) {
-            self.analyzer
-                .error("ALTC3037", "non-exhaustive match", span);
+            let missing = self.missing_patterns(value_type, &covered);
+            let mut diagnostic = Diagnostic::error(
+                "ALTC3037",
+                "non-exhaustive match",
+                &self.analyzer.source.path,
+                &self.analyzer.source.text,
+                span,
+            )
+            .with_help(format!(
+                "add match arms for {} or add a `_` arm",
+                missing.join(", ")
+            ));
+            if let Type::Enum(name) = value_type {
+                if let Some(info) = self.analyzer.model.enums.get(name) {
+                    diagnostic = diagnostic.with_label(info.span, "enum declared here");
+                }
+            }
+            self.analyzer.diagnostics.push(diagnostic);
         }
         result.unwrap_or(Type::Unit)
     }
@@ -2321,6 +3286,18 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                     self.analyzer
                         .error("ALTC3042", "variant belongs to a different enum", *span);
                 }
+                if let Some(info) = self.analyzer.model.enums.get(enum_name) {
+                    if !self.member_visible(
+                        enum_name,
+                        info.variant_public.get(variant).copied().unwrap_or(false),
+                    ) {
+                        self.analyzer.error(
+                            "ALTC3404",
+                            format!("enum variant `{variant}` is private"),
+                            *span,
+                        );
+                    }
+                }
                 let payload = self
                     .analyzer
                     .model
@@ -2359,6 +3336,16 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
                 if let Some(info) = info {
                     for field in fields {
                         if let Some(ty) = info.fields.get(&field.name) {
+                            if !self.member_visible(
+                                &path[0],
+                                info.field_public.get(&field.name).copied().unwrap_or(false),
+                            ) {
+                                self.analyzer.error(
+                                    "ALTC3404",
+                                    format!("struct field `{}` is private", field.name),
+                                    field.span,
+                                );
+                            }
                             if let Some(pattern) = &field.pattern {
                                 self.check_pattern(pattern, ty);
                             } else {
@@ -2394,6 +3381,39 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         }
     }
 
+    fn missing_patterns(&self, value_type: &Type, covered: &BTreeSet<String>) -> Vec<String> {
+        match value_type {
+            Type::Bool => ["true", "false"]
+                .into_iter()
+                .filter(|pattern| !covered.contains(*pattern))
+                .map(str::to_owned)
+                .collect(),
+            Type::Pointer { nullable: true, .. } => ["null", "nonnull(_)"]
+                .into_iter()
+                .filter(|pattern| {
+                    let coverage = if *pattern == "nonnull(_)" {
+                        "nonnull"
+                    } else {
+                        pattern
+                    };
+                    !covered.contains(coverage)
+                })
+                .map(str::to_owned)
+                .collect(),
+            Type::Enum(name) => self
+                .analyzer
+                .model
+                .enums
+                .get(name)
+                .into_iter()
+                .flat_map(|info| info.variants.keys())
+                .filter(|variant| !covered.contains(*variant))
+                .map(|variant| format!("{name}::{variant}"))
+                .collect(),
+            _ => vec!["the remaining values".to_owned()],
+        }
+    }
+
     fn route_error(&mut self, error_type: Type, span: Span) {
         if let Some(target) = self.try_errors.last_mut() {
             if let Some(previous) = target {
@@ -2419,12 +3439,20 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
         }
     }
 
+    fn member_visible(&self, type_name: &str, public: bool) -> bool {
+        public || module_owner(type_name) == self.function.as_deref().and_then(module_owner)
+    }
+
     fn memory(&mut self, function: &str, category: MemoryCategory, span: Span) {
         self.analyzer
             .direct_memory
             .entry(function.to_owned())
             .or_default()
-            .push(MemoryEvent { category, span });
+            .push(MemoryEvent {
+                category,
+                file: String::new(),
+                span,
+            });
     }
 
     fn unify(&mut self, left: &Type, right: &Type, span: Span) -> Type {
@@ -2444,14 +3472,22 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
 
     fn expect_same(&mut self, expected: &Type, actual: &Type, span: Span) {
         if !types_compatible(expected, actual) {
-            self.analyzer.error(
-                "ALTC3047",
-                format!(
-                    "type mismatch: expected `{}`, found `{}`",
-                    expected.display(),
-                    actual.display()
-                ),
-                span,
+            self.analyzer.diagnostics.push(
+                Diagnostic::error(
+                    "ALTC3047",
+                    format!(
+                        "type mismatch: expected `{}`, found `{}`",
+                        expected.display(),
+                        actual.display()
+                    ),
+                    &self.analyzer.source.path,
+                    &self.analyzer.source.text,
+                    span,
+                )
+                .with_help(format!(
+                    "change the expression to `{}` or use an explicit conversion when one is available",
+                    expected.display()
+                )),
             );
         }
     }
@@ -2459,7 +3495,7 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
     fn bind(&mut self, name: String, ty: Type, mutable: bool, span: Span) {
         let scope = self.scopes.last_mut().expect("binding scope");
         if scope
-            .insert(name.clone(), Binding { ty, mutable })
+            .insert(name.clone(), Binding { ty, mutable, span })
             .is_some()
         {
             self.analyzer.duplicate("binding", &name, span);
@@ -2468,6 +3504,15 @@ impl<'a, 'b> BodyChecker<'a, 'b> {
 
     fn lookup(&self, name: &str) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    fn binding_for_place(&self, expression: &Expr) -> Option<&Binding> {
+        match &expression.kind {
+            ExprKind::Path(path) if path.len() == 1 => self.lookup(&path[0]),
+            ExprKind::Field { base, .. } => self.binding_for_place(base),
+            ExprKind::Index { base, .. } => self.binding_for_place(base),
+            _ => None,
+        }
     }
 
     fn push_scope(&mut self) {
@@ -2577,10 +3622,52 @@ fn has_repr_c(attributes: &[Attribute]) -> bool {
         .any(|attribute| attribute.name == "repr" && attribute.arguments.as_slice() == ["C"])
 }
 
-fn by_value_named_type(ty: &Type) -> Option<&str> {
+fn attribute_spelling(name: &str, attributes: &[Attribute], attribute_name: &str) -> String {
+    attributes
+        .iter()
+        .find(|attribute| attribute.name == attribute_name)
+        .and_then(|attribute| attribute.arguments.first())
+        .and_then(|value| decode_quoted(value, "").ok())
+        .unwrap_or_else(|| name.to_owned())
+}
+
+fn extern_type_spelling(name: &str, attributes: &[Attribute]) -> (String, bool) {
+    if attributes
+        .iter()
+        .any(|attribute| attribute.name == "c_name")
+        && attributes
+            .iter()
+            .any(|attribute| attribute.name == "c_typedef")
+    {
+        return (name.to_owned(), false);
+    }
+    if let Some(attribute) = attributes
+        .iter()
+        .find(|attribute| attribute.name == "c_typedef")
+    {
+        return (
+            attribute
+                .arguments
+                .first()
+                .and_then(|value| decode_quoted(value, "").ok())
+                .unwrap_or_else(|| name.to_owned()),
+            true,
+        );
+    }
+    (attribute_spelling(name, attributes, "c_name"), false)
+}
+
+fn module_owner(name: &str) -> Option<&str> {
+    name.strip_prefix("altc_mod_")
+        .and_then(|name| name.split_once("___"))
+        .map(|(module, _)| module)
+}
+
+fn by_value_named_types(ty: &Type) -> Vec<String> {
     match ty {
-        Type::Struct(name) | Type::Enum(name) => Some(name),
-        _ => None,
+        Type::Struct(name) | Type::Enum(name) => vec![name.clone()],
+        Type::Array { element, .. } => by_value_named_types(element),
+        _ => Vec::new(),
     }
 }
 
@@ -2726,6 +3813,231 @@ mod tests {
             "fn value(p: ?*const i32) -> i32 { match p { nonnull(x) => *x, null => 0, } }",
         );
         assert!(analysis.succeeded(), "{:?}", analysis.diagnostics);
+    }
+
+    #[test]
+    fn checks_array_slice_range_and_range_for_contracts() {
+        let valid = analyze_text(
+            r#"
+const WIDTH: usize = 2usize;
+fn total(values: []const i32) -> i32 {
+  let mut result: i32 = 0;
+  for value in values { result += value; };
+  result
+}
+fn valid() -> i32 {
+  let mut matrix: [[i32; WIDTH]; 2usize] = [[1, 2], [3, 4]];
+  matrix[1usize][0usize] = 5;
+  let view = matrix[1usize][..];
+  total(slice_as_const(view))
+}
+"#,
+        );
+        assert!(valid.succeeded(), "{:?}", valid.diagnostics);
+
+        let invalid = analyze_text(
+            r#"
+const ZERO: usize = 0usize;
+fn invalid(number: usize) {
+  let zero: [i32; ZERO] = [1];
+  let values: [i32; 2usize] = [1, 2, 3];
+  values[2usize];
+  values[2usize..1usize];
+  values[number..1usize];
+  for value in 1 { value; };
+}
+"#,
+        );
+        let codes = invalid
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in ["ALTC3051", "ALTC3052", "ALTC3053", "ALTC3054"] {
+            assert!(codes.contains(expected), "missing {expected}: {codes:?}");
+        }
+        assert_eq!(
+            invalid
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "ALTC3053")
+                .count(),
+            2,
+            "a dynamic start must not be treated as statically zero"
+        );
+    }
+
+    #[test]
+    fn checks_every_sequence_builtin_and_const_length_path() {
+        let valid = analyze_text(
+            r#"
+const ONE: usize = 1usize;
+const TWO: usize = +((ONE + 5usize - 1usize) * 2usize / 5usize % 3usize) as usize;
+fn views(pointer: *mut i32, callback: fn() with { free }) -> usize with { free } {
+  callback();
+  let fixed: [i32; TWO] = [1, 2];
+  let view: []mut i32 = slice_from_parts[i32](pointer, TWO);
+  let none: []const i32 = empty_slice[i32]();
+  let none_mut: []mut i32 = empty_slice_mut[i32]();
+  let const_view: []const i32 = slice_as_const(view);
+  fixed.len + const_view.len + none.len + none_mut.len
+}
+"#,
+        );
+        assert!(valid.succeeded(), "{:?}", valid.diagnostics);
+
+        let invalid = analyze_text(
+            r#"
+const WRONG: usize = 1u32;
+const FIRST: usize = SECOND;
+const SECOND: usize = FIRST;
+fn errors(pointer: *mut i32) {
+  let bad_array: [unit; 1usize] = [{}];
+  let bad_slice: []const unit = empty_slice[unit]();
+  slice_from_parts[i32](pointer);
+  slice_from_parts[i32](1, 1usize);
+  empty_slice[i32](1);
+  empty_slice_mut[i32](1);
+  slice_as_const[i32](bad_slice);
+  slice_as_const(1);
+  let wrong_suffix: [i32; WRONG] = [1];
+  let cycle: [i32; FIRST] = [1];
+}
+"#,
+        );
+        let codes = invalid
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in ["ALTC3019", "ALTC3051", "ALTC3054"] {
+            assert!(codes.contains(expected), "missing {expected}: {codes:?}");
+        }
+    }
+
+    #[test]
+    fn checks_sequence_read_write_get_and_inference_paths() {
+        let analysis = analyze_text(
+            r#"
+fn sequences(values: []mut i32, number: i32) {
+  values[0usize] = 4;
+  let read: i32 = values[0usize];
+  let tail: []mut i32 = values[..];
+  tail.get();
+  tail.get(0usize, 1usize);
+  number.get(0usize);
+  number[..];
+  values.get(0usize)?;
+  let inferred = [1, 2, 3];
+  let wrongly_expected: i32 = [1];
+  let empty = [];
+  let array: [i32; 1usize] = [1];
+  array.get(0usize);
+  read; inferred; wrongly_expected; empty;
+}
+enum Failure { Failed, }
+fn callback_type(value: extern "C" fn() with { raise[Failure] }) { value; }
+"#,
+        );
+        let codes = analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in ["ALTC3016", "ALTC3052", "ALTC3054", "ALTC3105", "ALTC3214"] {
+            assert!(codes.contains(expected), "missing {expected}: {codes:?}");
+        }
+        let summary = analysis
+            .memory_summaries
+            .iter()
+            .find(|summary| summary.function == "sequences")
+            .unwrap();
+        assert!(summary.categories.contains(&MemoryCategory::IndirectRead));
+        assert!(summary.categories.contains(&MemoryCategory::IndirectWrite));
+    }
+
+    #[test]
+    fn analysis_queries_each_extern_declaration_kind_and_unmapped_diagnostics() {
+        for declaration in [
+            "opaque type O;",
+            "@c_name(\"object\") var object: c_int;",
+            "@c_name(\"record\") struct Record { value: c_int, }",
+            "@c_name(\"choice\") enum Choice { @c_name(\"CHOICE\") Value, }",
+        ] {
+            let analysis =
+                analyze_text(&format!("extern \"C\" from <stddef.h> {{ {declaration} }}"));
+            assert!(analysis.has_extern_declarations());
+        }
+
+        let mut diagnostic =
+            Diagnostic::error("TEST", "outside", "synthetic.altc", "", Span::new(2, 3));
+        remap_diagnostic(&mut diagnostic, &[]);
+        assert_eq!(diagnostic.file, "synthetic.altc");
+        let mut summaries = vec![MemorySummary {
+            function: "outside".to_owned(),
+            effects: BTreeSet::new(),
+            categories: BTreeSet::new(),
+            direct: vec![MemoryEvent {
+                category: MemoryCategory::IndirectRead,
+                file: String::new(),
+                span: Span::new(2, 3),
+            }],
+            transitive: Vec::new(),
+        }];
+        remap_memory_summaries(&mut summaries, &[]);
+        assert!(summaries[0].direct[0].file.is_empty());
+        let entry = analyze_text("@entry fn app() -> c_int { 0 }");
+        assert_eq!(entry.entrypoint(), Some("app"));
+    }
+
+    #[test]
+    fn checks_extern_objects_layout_and_callback_contracts() {
+        let analysis = analyze_text(
+            r#"
+enum Error { Failed, }
+extern "C" from "contracts.h" {
+  struct MissingContract { value: c_int, }
+  @c_name("both") @c_typedef("both_t") struct Both { value: c_int, }
+  @c_name("bad_enum") enum BadEnum { Value(c_int), }
+  @c_name("_reserved") var bad_name: c_int;
+  @c_name("same_symbol") var first: c_int;
+  @c_name("same_symbol") const second: c_int;
+  var unsafe_object: str;
+  var duplicate: c_int;
+  var duplicate: c_int;
+  fn missing_callback_effect(callback: extern "C" fn() with { alloc });
+  fn accepts(callback: extern "C" fn(c_int) -> c_int, value: c_int) -> c_int;
+}
+fn wrong(value: bool) -> bool { value }
+fn raising(value: c_int) -> c_int with { raise[Error] } { raise Error::Failed; }
+fn errors(callback: fn(c_int) -> c_int, raising_callback: fn(c_int) -> c_int with { raise[Error] }) {
+  second = 1;
+  accepts(wrong, 1);
+  let bad_c_callback: extern "C" fn(c_int) -> c_int = raising;
+  callback();
+  callback(1)?;
+  raising_callback(1);
+}
+"#,
+        );
+        let codes = analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "ALTC3006", "ALTC3008", "ALTC3016", "ALTC3105", "ALTC3106", "ALTC3210", "ALTC3211",
+            "ALTC3213", "ALTC3214", "ALTC3215",
+        ] {
+            assert!(codes.contains(expected), "missing {expected}: {codes:?}");
+        }
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ALTC3008"
+                && diagnostic
+                    .labels
+                    .iter()
+                    .any(|label| label.message.contains("read-only"))
+        }));
     }
 
     #[test]
@@ -2944,6 +4256,36 @@ fn missing_contract() -> ?*mut unit { allocator() }
                 mutable: false,
                 pointee: Box::new(Type::Int(IntType::I32)),
             },
+            Type::Array {
+                element: Box::new(Type::Int(IntType::I32)),
+                length: 2,
+            },
+            Type::Slice {
+                mutable: true,
+                element: Box::new(Type::Bool),
+            },
+            Type::Slice {
+                mutable: false,
+                element: Box::new(Type::Bool),
+            },
+            Type::FunctionPointer {
+                extern_c: true,
+                parameters: Vec::new(),
+                return_type: Box::new(Type::Unit),
+                effects: BTreeSet::new(),
+                error_type: None,
+            },
+            Type::FunctionPointer {
+                extern_c: false,
+                parameters: vec![Type::Int(IntType::I32)],
+                return_type: Box::new(Type::Bool),
+                effects: BTreeSet::from([
+                    Effect::Alloc,
+                    Effect::Free,
+                    Effect::Raise("E".to_owned()),
+                ]),
+                error_type: Some(Box::new(Type::Enum("E".to_owned()))),
+            },
             Type::Struct("S".to_owned()),
             Type::Enum("E".to_owned()),
             Type::Opaque("O".to_owned()),
@@ -2974,11 +4316,11 @@ fn missing_contract() -> ?*mut unit { allocator() }
         assert!(has_repr_c(std::slice::from_ref(&repr)));
         assert!(!has_repr_c(&[]));
         assert_eq!(
-            by_value_named_type(&Type::Struct("S".to_owned())),
-            Some("S")
+            by_value_named_types(&Type::Struct("S".to_owned())),
+            vec!["S"]
         );
-        assert_eq!(by_value_named_type(&Type::Enum("E".to_owned())), Some("E"));
-        assert_eq!(by_value_named_type(&Type::Bool), None);
+        assert_eq!(by_value_named_types(&Type::Enum("E".to_owned())), vec!["E"]);
+        assert!(by_value_named_types(&Type::Bool).is_empty());
 
         for effect in [
             EffectRef::Alloc(span),
@@ -3090,6 +4432,10 @@ const CALL: i32 = plain(1);
 fn errors(pointer: ?*mut Point, point: Point, number: i32) {
   let duplicate: i32 = 1;
   let duplicate: i32 = 2;
+  let fixed_point: Point = point;
+  fixed_point.x = 1;
+  let fixed_array: [i32; 1usize] = [1];
+  fixed_array[0usize] = 2;
   plain;
   E::One;
   missing;
@@ -3119,6 +4465,7 @@ fn errors(pointer: ?*mut Point, point: Point, number: i32) {
   1 = 2;
   match true { true => 1, true => 2, };
   match number { null => 0, nonnull(value) => 1, };
+  match pointer { null => 0, };
   match number { E::Empty => 0, };
   match E::Empty { Empty() => 0, };
   match E::Empty { F::Other => 0, E::Empty(inside) => 1, E::Missing => 2, };
@@ -3155,8 +4502,8 @@ fn errors(pointer: ?*mut Point, point: Point, number: i32) {
             "ALTC3021", "ALTC3022", "ALTC3023", "ALTC3024", "ALTC3027", "ALTC3028", "ALTC3029",
             "ALTC3030", "ALTC3031", "ALTC3032", "ALTC3033", "ALTC3034", "ALTC3035", "ALTC3036",
             "ALTC3038", "ALTC3039", "ALTC3040", "ALTC3041", "ALTC3042", "ALTC3043", "ALTC3044",
-            "ALTC3045", "ALTC3046", "ALTC3048", "ALTC3049", "ALTC3050", "ALTC3104", "ALTC3105",
-            "ALTC3107", "ALTC3302", "ALTC3303", "ALTC3304", "ALTC3305", "ALTC3306",
+            "ALTC3045", "ALTC3046", "ALTC3048", "ALTC3049", "ALTC3104", "ALTC3105", "ALTC3107",
+            "ALTC3302", "ALTC3303", "ALTC3304", "ALTC3305", "ALTC3306",
         ] {
             assert!(codes.contains(expected), "missing {expected}: {codes:?}");
         }
@@ -3250,9 +4597,12 @@ fn exercise(pointer: *mut Point, address: usize, flag: bool) -> i32 {
   let mut point: Point = Point { x: GLOBAL, y: LOCAL, };
   let mut number: i32 = 0;
   for (number = 0; number < 1; number += 1) {};
+  for (let mut index: i32 = 0; index < 1; index += 1) { number += index; };
+  for (;;) { break; };
   let immutable: *const Point = ptr_as_const(pointer);
   let raw: usize = ptr_addr(pointer);
   let changed: *mut i32 = ptr_cast_mut[i32](pointer);
+  let unchanged: *mut unit = ptr_cast[unit](pointer);
   let advanced: *mut Point = offset[Point](pointer, 1isize);
   let restored: ?*const Point = ptr_from_addr[Point](address);
   let restored_mut: ?*mut Point = ptr_from_addr_mut[Point](raw);
@@ -3263,12 +4613,16 @@ fn exercise(pointer: *mut Point, address: usize, flag: bool) -> i32 {
   pointer->y = *changed;
   point.x = advanced->x;
   let text: str = "text";
+  let c_text: *const c_char = c"valid";
+  let character: char = 'x';
   text.byte_len;
   match point { Point { x, y: renamed, } => x + renamed, _ => 0, };
-  match restored {
+  let result: i32 = match restored {
     nonnull(value) => value->x,
     null => if inverted { negative } else { point_address->y },
-  }
+  };
+  unchanged; c_text; character;
+  result
 }
 "#,
         );
@@ -3331,28 +4685,50 @@ fn edge(pointer: *mut i32, address: usize) {
             "CStruct".to_owned(),
             StructInfo {
                 fields: BTreeMap::new(),
+                field_public: BTreeMap::new(),
+                field_c_names: BTreeMap::new(),
                 repr_c: true,
+                is_extern: false,
+                c_name: "CStruct".to_owned(),
+                c_typedef: false,
             },
         );
         analyzer.model.structs.insert(
             "RustStruct".to_owned(),
             StructInfo {
                 fields: BTreeMap::new(),
+                field_public: BTreeMap::new(),
+                field_c_names: BTreeMap::new(),
                 repr_c: false,
+                is_extern: false,
+                c_name: "RustStruct".to_owned(),
+                c_typedef: false,
             },
         );
         analyzer.model.enums.insert(
             "CEnum".to_owned(),
             EnumInfo {
                 variants: BTreeMap::new(),
+                variant_public: BTreeMap::new(),
+                variant_c_names: BTreeMap::new(),
                 repr_c: true,
+                is_extern: false,
+                c_name: "CEnum".to_owned(),
+                c_typedef: false,
+                span: Span::default(),
             },
         );
         analyzer.model.enums.insert(
             "RustEnum".to_owned(),
             EnumInfo {
                 variants: BTreeMap::new(),
+                variant_public: BTreeMap::new(),
+                variant_c_names: BTreeMap::new(),
                 repr_c: false,
+                is_extern: false,
+                c_name: "RustEnum".to_owned(),
+                c_typedef: false,
+                span: Span::default(),
             },
         );
         for (ty, safe) in [
@@ -3458,6 +4834,18 @@ fn edge(pointer: *mut i32, address: usize) {
             "struct"
         );
         assert_eq!(checker.unify(&Type::Unknown, &Type::Bool, span), Type::Bool);
+        assert_eq!(checker.unify(&Type::Bool, &Type::Never, span), Type::Bool);
+        assert_eq!(
+            checker.missing_patterns(
+                &Type::Pointer {
+                    nullable: true,
+                    mutable: false,
+                    pointee: Box::new(Type::Bool),
+                },
+                &BTreeSet::from(["null".to_owned()]),
+            ),
+            vec!["nonnull(_)".to_owned()]
+        );
         checker.pop_scope();
 
         let unsupported = analyze_text("import feature;");

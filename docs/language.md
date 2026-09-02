@@ -2,9 +2,11 @@
 
 ここに書かれた範囲は、[compiler test](../crates/altc-compiler/src/)と[CLI integration test](../crates/altc-cli/tests/cli.rs)から要約したものです。この文書は将来の構文を予約せず、現在の実装より強い保証を与えません。
 
-## 最小program
+## programとmodule
 
-sourceはUTF-8の単一`.altc` fileです。実行形式には、parameterを持たず`c_int`を返す非公開の`@entry` functionが一つ必要です。
+sourceはUTF-8の`.altc` fileです。CLIへ渡したfileがroot moduleになり、その親directoryをsource rootとして`import math;`は`math.altc`、`import net::http;`は`net/http.altc`を読みます。import graphはcycleを許さず、他moduleの宣言は`module::symbol`というqualified pathでだけ参照できます。外部から見えるfunction、struct、enumには`pub`が必要で、fieldとvariantにも個別の`pub`が必要です。
+
+graph全体を一つのC11 translation unitへ生成します。root moduleの内部名は従来どおりで、import先だけlogical module pathを含む決定的な名前になります。`@entry`はroot moduleのparameterなし・非公開・非raising・`c_int`を返すfunction一つに限ります。
 
 ```altc run=75
 const Limit: i32 = 100;
@@ -37,17 +39,25 @@ blockの最後のsemicolonなしexpressionがblockの値です。`let`はinitial
 - `c_char`、`c_schar`、`c_uchar`、`c_short`、`c_ushort`、`c_int`、`c_uint`、`c_long`、`c_ulong`、`c_longlong`、`c_ulonglong`
 - `c_float`、`c_double`、`c_longdouble`
 - non-null pointer `*const T` / `*mut T`、nullable pointer `?*const T` / `?*mut T`
+- 固定長array `[T; N]`、slice `[]const T` / `[]mut T`
+- altc function pointer `fn(...) -> T`、C callback `extern "C" fn(...) -> T`
 - named `struct`、payloadを持てる`enum`、extern block内のopaque type
 
-整数・浮動小数literalはsuffixまたは周囲の型から決まります。通常の数値castは`value as T`です。`struct` literalとfield access、enum constructorとpayload pattern、`@repr(C)`のpayloadなしenumを利用できます。bool、enum、nullable pointerの`match`は網羅性を検査します。実行テストは[data/control fixture](../tests/fixtures/data_control.altc)にあります。
+整数・浮動小数literalはsuffixまたは周囲の型から決まり、通常の数値castは`value as T`です。`struct` literalとfield access、enum constructorとpayload pattern、`@repr(C)`のpayloadなしenumを利用できます。bool、enum、nullable pointerの`match`は網羅性を検査します。
+
+array lengthは1以上のcompile-time `usize`でなければなりません。`[a, b, c]`は期待型または要素から型を決めます。arrayはvalue copy、sliceはtyped pointerとlengthを持つviewです。array/sliceのindexとruntime rangeは実行時にbounds checkをせず、compile-timeに範囲外と分かる場合だけ拒否します。sliceやraw pointerの生存期間、動的range、danglingはCと同じく利用者の責任です。
+
+`.len`は`usize`を返し、addressableなarray/sliceの`.get(index)`はboundsを検査してnullable element pointerを返します。`base[start..end]`、`base[..end]`、`base[start..]`、`base[..]`は半開sliceです。`slice_from_parts[T]`、`empty_slice[T]`、`empty_slice_mut[T]`、`slice_as_const`でviewを明示的に構築・変換できます。
 
 ## 式と制御
 
-実装されている制御構文はblock、`if` / `else`、`match`、`while`、C風`for`、`return`、`break`、`continue`です。operatorは通常の算術・比較・論理・bit演算、assignmentとcompound assignmentに加え、wrapping `+%` / `-%` / `*%`、saturating `+|` / `-|` / `*|`とそれぞれのassignment形を持ちます。backendは式の左から右の評価順をtemporaryへ線形化して保持します。
+実装されている制御構文はblock、`if` / `else`、`match`、`while`、C風`for`、array/slice専用の`for value in sequence`、`return`、`break`、`continue`です。range-forはsequenceを一度評価し、lengthを一度保存してimmutableな要素copyを走査します。iterator objectやallocationは生成しません。
+
+operatorは通常の算術・比較・論理・bit演算、assignmentとcompound assignmentに加え、wrapping `+%` / `-%` / `*%`、saturating `+|` / `-|` / `*|`とそれぞれのassignment形を持ちます。backendは式の左から右の評価順をtemporaryへ線形化して保持します。
 
 `defer { ... }`はscope退出時にLIFOで実行され、通常終了、`return`、`break`、`continue`、error伝播を覆います。defer body内からのcontrol transferとraising propagationは拒否されます。
 
-## pointerとmemory summary
+## pointer、effect、memory summary
 
 `&place`でaddressを取得し、`*pointer`でdereferenceします。nullable pointerは直接dereferenceできず、`null` / `nonnull(name)` patternで絞り込みます。
 
@@ -60,7 +70,7 @@ extern "C" from <stdlib.h> {
 @entry
 fn application_main() -> c_int with { alloc, free } {
   let data: *mut u8 = match malloc(sizeof[u8]) {
-    nonnull(raw) => ptr_cast[u8](raw),
+    nonnull(raw) => ptr_cast_mut[u8](raw),
     null => return 2,
   };
   defer {
@@ -71,76 +81,32 @@ fn application_main() -> c_int with { alloc, free } {
 }
 ```
 
-現在のpointer builtinは`sizeof[T]`、`alignof[T]`、`ptr_as_const`、`ptr_cast[T]`、`ptr_cast_mut[T]`、`offset[T]`、`ptr_addr`、`ptr_from_addr[T]`、`ptr_from_addr_mut[T]`です。解析結果は直接・推移eventを分け、現在は間接read、間接write、extern callをmemory summaryへ記録します。再帰call graphはfixed pointまで伝播します。
+pointer/layout builtinは`sizeof[T]`、`alignof[T]`、`ptr_as_const`、`ptr_cast[T]`、`ptr_cast_mut[T]`、`offset[T]`、`ptr_addr`、`ptr_from_addr[T]`、`ptr_from_addr_mut[T]`です。登録済みbuiltinだけが`name[T](...)`を受理するため、通常の`value[index](...)`をgeneric callとして誤解釈しません。
 
-## effect、typed error、defer
+functionがallocation、解放、typed errorを実行する場合、`with { alloc, free, raise[E] }`のように宣言します。bodyの実effectは宣言集合のsubsetでなければなりません。raising callにはpostfix `?`が必要で、同じ`raise[E]` contractまたはlexicalな`try ... catch`へ接続します。function pointerにもeffect集合が含まれ、indirect callへ同じ規則で伝播します。
 
-functionがallocation、解放、typed errorを実行する場合、`with { alloc, free, raise[E] }`のように宣言します。bodyの実effectは宣言集合のsubsetでなければなりません。raising callにはpostfix `?`が必要で、同じ`raise[E]` contractまたはlexicalな`try ... catch`へ接続します。
-
-```altc run=7
-extern "C" from <stdio.h> {
-  fn puts(message: *const c_char) -> c_int;
-}
-
-enum Failure {
-  Negative,
-}
-
-fn checked(value: i32) -> i32 with { raise[Failure] } {
-  if value < 0 {
-    raise Failure::Negative;
-  };
-  value
-}
-
-fn work(value: i32) -> i32 with { raise[Failure] } {
-  defer {
-    puts(c"cleanup");
-  }
-  checked(value)?
-}
-
-@entry
-fn application_main() -> c_int {
-  try {
-    work(7)? as c_int
-  } catch {
-    Failure::Negative => 1,
-  }
-}
-```
+解析結果は直接・推移eventを分け、間接read/write、extern call、extern global read/write、indirect callをmemory summaryへ記録します。再帰call graphは有限集合のfixed pointまで伝播し、moduleをまたぐeventも元fileとlocal byte spanを保持します。
 
 ## C連携
 
-`extern "C" from <header.h>`はC functionと`@c_typedef`付きopaque typeを宣言できます。`build`は生成したFFI検証translation unitをC compilerへ渡し、parameterとreturn typeの不一致を拒否します。
+`extern "C" from <header.h>`またはquoted headerのblockでは、C function、addressableな`var` / `const` object、opaque type、struct、enumを宣言できます。extern `const`はmacroやenumeratorではなく、addressを取得できるC objectを意味します。extern struct/enumは`@c_name`によるtag名または`@c_typedef`によるtypedef名を必要とし、field・variantのspellingも`@c_name`で固定できます。
 
-`export "C" fn`はpublic headerを生成し、`@c_name("symbol")`でC symbolを固定できます。raising exportはstatusをreturnし、成功値をout parameterへ書くABIになります。
+C callbackは`extern "C" fn(...)`で表し、ABI-safeでraisingしないaltc functionを渡せます。closure、capturing environment、nullable callbackはありません。通常のaltc function pointerは宣言effectを持てますが、C callbackは`raise`をABI境界へ運べません。
 
-```altc check
-@repr(C)
-enum ApiError {
-  Negative,
-}
+`build`は生成したFFI検証translation unitをC compilerへ渡し、functionとcallback signature、global型とconstness、structのsize/alignment/offset/field型、enum spellingを検証します。不一致は`ALTC6101`で失敗します。array/sliceのC ABI by-value parameter/returnは拒否されるため、C公開面ではpointerとlengthまたは明示的な`@repr(C)` wrapperを使います。
 
-@c_name("checked_double")
-export "C" fn checked_double(value: i32) -> i32 with { raise[ApiError] } {
-  if value < 0 {
-    raise ApiError::Negative;
-  };
-  value * 2
-}
-```
+`export "C" fn`はpublic headerを生成し、`@c_name("symbol")`でC symbolを固定できます。raising exportはstatusをreturnし、成功値をout parameterへ書くABIになります。import先のexportもgraph全体のheaderへ集約し、C symbol重複を検査します。
 
-主要機能を個別ではなく同じ実行経路で組み合わせたprogramは[feature showcase](../examples/feature_showcase.altc)にあります。C ABI、opaque type、pointer、effect、nested `try`、全退出pathの`defer`、整数境界値をstrict C11の`-Werror`でbuild/runします。
+単一fileの統合例は[feature showcase](../examples/feature_showcase.altc)、moduleと外部C libraryを含む例は[telemetry pipeline](../examples/telemetry_pipeline/README.md)にあります。
 
 ## 現在対象外
 
-次は現在実装されていません。parserが認識できるものは、別の意味へ変換せず`ALTC4001`で拒否します。
+次は現在実装されていません。parserが認識できるものは、別の意味へ変換せず`ALTC4001`などの専用診断で拒否します。
 
-- import、複数module、project設定、cross compilation
-- generic、trait、impl、method、function pointer、callback
-- array、slice、range-for、`Option` / `Result`、checked数値builtin
-- extern macro、variable、constant、struct、enum、variadic function
+- project設定、package manager、remote dependency、re-export、import alias/wildcard、cross compilation、複数C translation unit
+- generic、trait、impl、method解決、closure、capturing callback
+- `Option` / `Result`、checked range、checked数値builtin、borrow/lifetime検査
+- extern macro、preprocessor constant、variadic、volatile、nullable callback
 - formatter、test runner、documentation generator、LSP、optimizer、incremental build
 
 ```altc compile_fail=ALTC4001

@@ -42,14 +42,14 @@ cargo xtask coverage --minimum 100
 
 ## 言語評価
 
-[評価corpus](../eval/README.md)は6領域のwritability goldenと9種類のrepair pairを持ちます。broken sourceの診断JSONは完全一致、fixed sourceはstrict C11生成まで成功しなければなりません。意図した診断変更だけを確認後、`cargo xtask eval --update`でsnapshotへ反映します。
+[評価corpus](../eval/README.md)は9領域のwritability goldenと12種類のrepair pairを持ちます。broken sourceの診断JSONは完全一致、fixed sourceはstrict C11生成まで成功しなければなりません。意図した診断変更だけを確認後、`cargo xtask eval --update`でsnapshotへ反映します。
 
 [feature showcase](../examples/feature_showcase.altc)は主要言語機能を同じprogramへ統合し、CLI integration testでFFI検証、memory summary、strict C11 build、実行結果、cleanup順を固定します。
 
 ## 性能
 
-wall-clock benchmarkはwarm-up後、最低計測時間を超えるまでiterationを倍増します。共有runnerの時間は参考値でありgateに使いません。syntheticな200-function programとfeature showcaseのanalyze、C生成、pipelineを計測し、JSONとMarkdown summaryはCI artifactとして保存します。
+wall-clock benchmarkはwarm-up後、最低計測時間を超えるまでiterationを倍増します。共有runnerの時間は参考値でありgateに使いません。syntheticな200-function program、feature showcase、複数moduleのtelemetry projectについてanalyze、C生成、pipelineを計測し、JSONとMarkdown summaryはCI artifactとして保存します。
 
-blocking gateは[生成物size baseline](../bench/perf/baseline.json)にある代表fixtureのC source、public header、FFI検証TUを比較します。小さなfixtureに加えてfeature showcaseも対象とし、case一覧の差異と2%を超える増加を拒否します。意味のある生成物変更を確認した場合だけ`cargo xtask perf --update`で更新します。
+blocking gateは[生成物size baseline](../bench/perf/baseline.json)にある代表fixtureのC source、public header、FFI検証TUを比較します。小さなfixtureに加えてfeature showcaseとtelemetry projectも対象とし、case一覧の差異と2%を超える増加を拒否します。意味のある生成物変更を確認した場合だけ`cargo xtask perf --update`で更新します。
 
 Markdown parser、compile-fail code、link、skip ratchet、diagnostic snapshot、性能ratchet、staged tree展開には、正常例と意図的な失敗を持つself-testがあります。

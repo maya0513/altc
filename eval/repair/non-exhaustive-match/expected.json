@@ -6,7 +6,7 @@
       "line": 9
     },
     "file": "eval/repair/non-exhaustive-match/broken.altc",
-    "help": null,
+    "help": "add match arms for Choice::Second or add a `_` arm",
     "labels": [
       {
         "message": "",
@@ -14,6 +14,14 @@
         "span": {
           "end": 113,
           "start": 72
+        }
+      },
+      {
+        "message": "enum declared here",
+        "primary": false,
+        "span": {
+          "end": 34,
+          "start": 0
         }
       }
     ],

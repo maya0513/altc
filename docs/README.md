@@ -14,6 +14,7 @@
 | [CLI](cli.md) | `check`、`emit-c`、`build`、`run`と共通option |
 | [compiler](compiler.md) | 公開Rust API、解析pipeline、C11 backend |
 | [実装監査](implementation-audit.md) | 解決したP0/P1、既知課題、継続監査の入口 |
+| [次期開発計画と進捗](development-progress.md) | 複数module対応までの作業順序、到達点、残作業、最新の検証結果 |
 | [テストと性能](testing-and-benchmarks.md) | 標準gate、coverage、評価corpus、benchmark |
 | [開発方針](development-policy.md) | 正本、優先順位、変更手順、tool version方針 |
 | [言語評価](../eval/README.md) | writabilityとrepair corpus、評価rubric、所見 |

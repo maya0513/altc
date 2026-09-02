@@ -6,7 +6,7 @@
       "line": 2
     },
     "file": "eval/repair/type-mismatch/broken.altc",
-    "help": null,
+    "help": "change the expression to `bool` or use an explicit conversion when one is available",
     "labels": [
       {
         "message": "",

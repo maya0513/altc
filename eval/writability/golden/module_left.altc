@@ -1,0 +1,5 @@
+import module_common;
+
+pub fn value() -> c_int {
+  module_common::base()
+}

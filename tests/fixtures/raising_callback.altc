@@ -1,0 +1,27 @@
+enum CallbackError {
+  Failed,
+}
+
+fn fail(value: i32) -> i32 with { raise[CallbackError] } {
+  if value == 0 {
+    raise CallbackError::Failed;
+  } else {
+    value
+  }
+}
+
+fn invoke(
+  callback: fn(i32) -> i32 with { raise[CallbackError] },
+  value: i32,
+) -> i32 with { raise[CallbackError] } {
+  callback(value)?
+}
+
+@entry
+fn application_main() -> c_int {
+  try {
+    invoke(fail, 0)? as c_int
+  } catch {
+    CallbackError::Failed => 7,
+  }
+}

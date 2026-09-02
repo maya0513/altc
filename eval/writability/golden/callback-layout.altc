@@ -1,0 +1,34 @@
+extern "C" from "eval_ffi.h" {
+  @c_typedef("eval_point_t")
+  struct Point {
+    @c_name("value") value: c_int,
+    @c_name("scale") scale: c_int,
+  }
+
+  @c_name("eval_state")
+  enum State {
+    @c_name("EVAL_READY") Ready,
+    @c_name("EVAL_STOPPED") Stopped,
+  }
+
+  @c_name("eval_counter") var counter: c_int;
+  @c_name("eval_limit") const limit: c_int;
+  @c_name("eval_apply")
+  fn apply(callback: extern "C" fn(c_int) -> c_int, value: c_int) -> c_int;
+}
+
+fn double(value: c_int) -> c_int {
+  value * 2
+}
+
+@entry
+fn application_main() -> c_int {
+  counter += 1;
+  let point = Point { value: 3, scale: 1, };
+  let state: State = State::Ready;
+  let ready: c_int = match state {
+    State::Ready => 1,
+    State::Stopped => 0,
+  };
+  apply(double, point.value) + limit + counter + ready
+}

@@ -1,0 +1,41 @@
+import model;
+
+extern "C" from <stdlib.h> {
+  fn malloc(size: usize) -> ?*mut unit with { alloc };
+  fn free(pointer: *mut unit) with { free };
+}
+
+extern "C" from <stdio.h> {
+  fn puts(message: *const c_char) -> c_int;
+}
+
+pub fn weighted_sum(readings: []const model::Reading) -> i32 with { raise[model::PipelineError] } {
+  if readings.len == 0usize {
+    raise model::PipelineError::Empty;
+  };
+  let mut total: i32 = 0;
+  for reading in readings {
+    total += reading.value * reading.weight;
+  };
+  total
+}
+
+pub fn allocate_reading(value: i32, weight: i32) -> ?*mut model::Reading with { alloc } {
+  match malloc(sizeof[model::Reading]) {
+    nonnull(raw) => {
+      let reading: *mut model::Reading = ptr_cast_mut[model::Reading](raw);
+      reading->value = value;
+      reading->weight = weight;
+      ptr_from_addr_mut[model::Reading](ptr_addr(reading))
+    },
+    null => null,
+  }
+}
+
+pub fn release_reading(reading: *mut model::Reading) with { free } {
+  free(ptr_cast[unit](reading));
+}
+
+pub fn cleanup_marker() {
+  puts(c"pipeline cleanup");
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "code": "ALTC3404",
+    "end": {
+      "column": 18,
+      "line": 4
+    },
+    "file": "eval/repair/module-privacy/broken.altc",
+    "help": "add `pub` to `hidden` in module `library`",
+    "labels": [
+      {
+        "message": "",
+        "primary": true,
+        "span": {
+          "end": 58,
+          "start": 43
+        }
+      }
+    ],
+    "message": "`library::hidden` is private",
+    "notes": [],
+    "severity": "error",
+    "span": {
+      "end": 58,
+      "start": 43
+    },
+    "start": {
+      "column": 3,
+      "line": 4
+    }
+  }
+]

@@ -41,11 +41,21 @@ impl Parser<'_> {
     fn parse_program(&mut self) -> Program {
         let mut items = Vec::new();
         while !self.at_eof() {
-            let start = self.current().span.start;
             let attributes = self.parse_attributes();
 
-            if self.at("import")
-                || self.at("trait")
+            if self.at("import") {
+                let start = self.bump().span.start;
+                let (path, _) = self.parse_path();
+                let end = self.expect(";", "expected `;` after import").span.end;
+                items.push(Item::Import(ImportDecl {
+                    path,
+                    span: Span::new(start, end),
+                }));
+                continue;
+            }
+
+            if self.at("trait")
+                || self.at("impl")
                 || self.at("impl")
                 || self.at("type")
                 || self.at("test")
@@ -101,9 +111,6 @@ impl Parser<'_> {
 
             if let Some(item) = item {
                 items.push(item);
-            }
-            if self.current().span.start == start && !self.at_eof() {
-                self.bump();
             }
         }
         Program { items }
@@ -287,7 +294,7 @@ impl Parser<'_> {
         let mut fields = Vec::new();
         while !self.at("}") && !self.at_eof() {
             let field_attributes = self.parse_attributes();
-            if !field_attributes.is_empty() {
+            if !is_extern && !field_attributes.is_empty() {
                 self.unsupported("attributes on struct fields", field_attributes[0].span);
             }
             let field_public = self.eat("pub").is_some();
@@ -299,6 +306,7 @@ impl Parser<'_> {
             let ty = self.parse_type();
             let end = self.expect(",", "expected `,` after field").span.end;
             fields.push(FieldDecl {
+                attributes: field_attributes,
                 public: field_public,
                 name: field_name.text,
                 ty,
@@ -390,6 +398,9 @@ impl Parser<'_> {
         self.expect("{", "expected `{` in extern block");
         let mut functions = Vec::new();
         let mut opaque_types = Vec::new();
+        let mut globals = Vec::new();
+        let mut structs = Vec::new();
+        let mut enums = Vec::new();
         while !self.at("}") && !self.at_eof() {
             let attributes = self.parse_attributes();
             if self.at("fn") {
@@ -410,6 +421,38 @@ impl Parser<'_> {
                         header: header.clone(),
                     });
                 }
+            } else if self.at("var") || self.at("const") {
+                let mutable = self.eat("var").is_some();
+                if !mutable {
+                    self.expect("const", "expected `const`");
+                }
+                let global_start = self.previous().span.start;
+                let Some(name) = self.expect_ident("expected extern object name") else {
+                    self.synchronize_list("}");
+                    continue;
+                };
+                self.expect(":", "expected `:` after extern object name");
+                let ty = self.parse_type();
+                let end = self
+                    .expect(";", "expected `;` after extern object")
+                    .span
+                    .end;
+                globals.push(ExternGlobal {
+                    attributes,
+                    mutable,
+                    name: name.text,
+                    ty,
+                    span: Span::new(global_start, end),
+                    header: header.clone(),
+                });
+            } else if self.at("struct") {
+                if let Some(declaration) = self.parse_struct(attributes, false, true) {
+                    structs.push(declaration);
+                }
+            } else if self.at("enum") {
+                if let Some(declaration) = self.parse_enum(attributes, false, true) {
+                    enums.push(declaration);
+                }
             } else {
                 let feature = self.current().text.clone();
                 let span = self.consume_unsupported_item(&format!("extern {feature}"));
@@ -421,6 +464,9 @@ impl Parser<'_> {
             header,
             functions,
             opaque_types,
+            globals,
+            structs,
+            enums,
             span: Span::new(start, end),
         })
     }
@@ -451,19 +497,76 @@ impl Parser<'_> {
             );
         }
         if self.at("[") {
-            let span = self.consume_balanced("[", "]");
-            self.unsupported("array and slice types", span);
-            return TypeRef::Unsupported {
-                feature: "array or slice".to_owned(),
-                span,
+            let open = self.bump();
+            if self.eat("]").is_some() {
+                let mutable = if self.eat("mut").is_some() {
+                    true
+                } else {
+                    self.expect("const", "expected `const` or `mut` after `[]`");
+                    false
+                };
+                let element = self.parse_type();
+                return TypeRef::Slice {
+                    mutable,
+                    span: Span::new(open.span.start, element.span().end),
+                    element: Box::new(element),
+                };
+            }
+            let element = self.parse_type();
+            self.expect(";", "expected `;` between array element type and length");
+            let length = self.parse_expression(true);
+            let end = self.expect("]", "expected `]` after array length").span.end;
+            return TypeRef::Array {
+                element: Box::new(element),
+                length: Box::new(length),
+                span: Span::new(open.span.start, end),
             };
         }
         if self.at("extern") || self.at("fn") {
-            let span = self.consume_type_like();
-            self.unsupported("function pointer types", span);
-            return TypeRef::Unsupported {
-                feature: "function pointer".to_owned(),
-                span,
+            let extern_c = if self.eat("extern").is_some() {
+                let convention = self.expect_kind(
+                    TokenKind::String,
+                    "expected calling convention after `extern`",
+                );
+                if convention
+                    .as_ref()
+                    .is_some_and(|convention| convention.text != "\"C\"")
+                {
+                    self.unsupported(
+                        "function pointer calling conventions other than C",
+                        convention.expect("present convention").span,
+                    );
+                }
+                true
+            } else {
+                false
+            };
+            self.expect("fn", "expected `fn` in function pointer type");
+            self.expect("(", "expected `(` in function pointer type");
+            let mut parameters = Vec::new();
+            while !self.at(")") && !self.at_eof() {
+                parameters.push(self.parse_type());
+                if self.eat(",").is_none() {
+                    break;
+                }
+            }
+            self.expect(")", "expected `)` after function pointer parameters");
+            let return_type = if self.eat("->").is_some() {
+                self.parse_type()
+            } else {
+                TypeRef::Named {
+                    path: vec!["unit".to_owned()],
+                    span: self.previous().span,
+                }
+            };
+            let effects = self.parse_effects();
+            let end = self.previous().span.end.max(return_type.span().end);
+            return TypeRef::FunctionPointer {
+                extern_c,
+                parameters,
+                return_type: Box::new(return_type),
+                effects,
+                span: Span::new(start, end),
             };
         }
         let (path, span) = self.parse_path();
@@ -607,9 +710,51 @@ impl Parser<'_> {
                 continue;
             }
             if self.at("[") {
-                let span = self.consume_balanced("[", "]");
-                self.unsupported("indexing, slicing, and generic calls", span);
-                left.span = left.span.join(span);
+                let start = left.span.start;
+                self.bump();
+                if self.eat("..").is_some() {
+                    let end_value = if self.at("]") {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expression(true)))
+                    };
+                    let end = self.expect("]", "expected `]` after slice range").span.end;
+                    left = self.expr(
+                        ExprKind::Slice {
+                            base: Box::new(left),
+                            start: None,
+                            end: end_value,
+                        },
+                        Span::new(start, end),
+                    );
+                    continue;
+                }
+                let first = self.parse_expression(true);
+                if self.eat("..").is_some() {
+                    let end_value = if self.at("]") {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expression(true)))
+                    };
+                    let end = self.expect("]", "expected `]` after slice range").span.end;
+                    left = self.expr(
+                        ExprKind::Slice {
+                            base: Box::new(left),
+                            start: Some(Box::new(first)),
+                            end: end_value,
+                        },
+                        Span::new(start, end),
+                    );
+                } else {
+                    let end = self.expect("]", "expected `]` after index").span.end;
+                    left = self.expr(
+                        ExprKind::Index {
+                            base: Box::new(left),
+                            index: Box::new(first),
+                        },
+                        Span::new(start, end),
+                    );
+                }
                 continue;
             }
             if self.at("as") {
@@ -733,6 +878,21 @@ impl Parser<'_> {
                 self.expect(")", "expected `)` after expression");
                 expression
             }
+            "[" => {
+                let start = self.bump().span.start;
+                let mut values = Vec::new();
+                while !self.at("]") && !self.at_eof() {
+                    values.push(self.parse_expression(true));
+                    if self.eat(",").is_none() {
+                        break;
+                    }
+                }
+                let end = self
+                    .expect("]", "expected `]` after array literal")
+                    .span
+                    .end;
+                self.expr(ExprKind::ArrayLiteral(values), Span::new(start, end))
+            }
             "true" | "false" | "null" => {
                 self.bump();
                 let literal = match token.text.as_str() {
@@ -752,14 +912,7 @@ impl Parser<'_> {
             ) =>
             {
                 self.bump();
-                let literal = match token.kind {
-                    TokenKind::Int => Literal::Int(token.text),
-                    TokenKind::Float => Literal::Float(token.text),
-                    TokenKind::String => Literal::String(token.text),
-                    TokenKind::CString => Literal::CString(token.text),
-                    TokenKind::Char => Literal::Char(token.text),
-                    _ => unreachable!(),
-                };
+                let literal = literal_from_token(&token).expect("guarded literal token");
                 self.expr(ExprKind::Literal(literal), token.span)
             }
             _ if matches!(token.kind, TokenKind::Byte | TokenKind::ByteString) => {
@@ -769,7 +922,24 @@ impl Parser<'_> {
             }
             _ if token.kind == TokenKind::Ident => {
                 let (path, mut span) = self.parse_path();
-                if self.at("[") {
+                let type_applied_builtin = path.len() == 1
+                    && matches!(
+                        path[0].as_str(),
+                        "sizeof"
+                            | "alignof"
+                            | "ptr_cast"
+                            | "ptr_cast_mut"
+                            | "ptr_as_const"
+                            | "offset"
+                            | "ptr_addr"
+                            | "ptr_from_addr"
+                            | "ptr_from_addr_mut"
+                            | "slice_from_parts"
+                            | "empty_slice"
+                            | "empty_slice_mut"
+                            | "slice_as_const"
+                    );
+                if type_applied_builtin && self.at("[") {
                     let generic_start = self.bump().span.start;
                     let mut arguments = Vec::new();
                     while !self.at("]") && !self.at_eof() {
@@ -784,22 +954,6 @@ impl Parser<'_> {
                         .end;
                     let generic_span = Span::new(generic_start, generic_end);
                     span = span.join(generic_span);
-                    let builtin = path.len() == 1
-                        && matches!(
-                            path[0].as_str(),
-                            "sizeof"
-                                | "alignof"
-                                | "ptr_cast"
-                                | "ptr_cast_mut"
-                                | "ptr_as_const"
-                                | "offset"
-                                | "ptr_addr"
-                                | "ptr_from_addr"
-                                | "ptr_from_addr_mut"
-                        );
-                    if !builtin {
-                        self.unsupported("generic calls and constructors", generic_span);
-                    }
                     return self.expr(ExprKind::TypeApply { path, arguments }, span);
                 }
                 if allow_struct_literal && self.at("{") {
@@ -1015,9 +1169,25 @@ impl Parser<'_> {
     fn parse_for(&mut self) -> Expr {
         let start = self.expect("for", "expected `for`").span.start;
         if !self.at("(") {
-            let span = self.consume_until_block_end();
-            self.unsupported("range-for loops", span);
-            return self.expr(ExprKind::Error, Span::new(start, span.end));
+            let binding = self
+                .expect_ident("expected range-for binding")
+                .unwrap_or_else(|| Token {
+                    kind: TokenKind::Ident,
+                    text: "error".to_owned(),
+                    span: self.current().span,
+                });
+            self.expect("in", "expected `in` after range-for binding");
+            let sequence = self.parse_expression(false);
+            let body = self.parse_block();
+            return self.expr(
+                ExprKind::RangeFor {
+                    binding: binding.text,
+                    binding_span: binding.span,
+                    sequence: Box::new(sequence),
+                    body: body.clone(),
+                },
+                Span::new(start, body.span.end),
+            );
         }
         self.bump();
         let initializer = if self.at(";") {
@@ -1143,27 +1313,6 @@ impl Parser<'_> {
         Span::new(start, end)
     }
 
-    fn consume_type_like(&mut self) -> Span {
-        let start = self.current().span.start;
-        let mut end = self.bump().span.end;
-        while !self.at_eof() && !matches!(self.current().text.as_str(), "," | ")" | ";" | "{") {
-            end = self.bump().span.end;
-        }
-        Span::new(start, end)
-    }
-
-    fn consume_until_block_end(&mut self) -> Span {
-        let start = self.current().span.start;
-        let mut end = start;
-        while !self.at_eof() {
-            if self.at("{") {
-                return self.consume_balanced("{", "}");
-            }
-            end = self.bump().span.end;
-        }
-        Span::new(start, end)
-    }
-
     fn synchronize_item(&mut self) {
         while !self.at_eof() {
             if self.at(";") {
@@ -1235,7 +1384,9 @@ impl Parser<'_> {
                 &self.source.text,
                 span,
             )
-            .with_help("use the single-file v0 language subset documented in docs/implementation-status.md"),
+            .with_help(
+                "use the implemented language subset documented in docs/language.md#現在対象外",
+            ),
         );
     }
 
@@ -1344,6 +1495,17 @@ fn unary_operator(operator: &str) -> Option<UnaryOp> {
     }
 }
 
+fn literal_from_token(token: &Token) -> Option<Literal> {
+    match token.kind {
+        TokenKind::Int => Some(Literal::Int(token.text.clone())),
+        TokenKind::Float => Some(Literal::Float(token.text.clone())),
+        TokenKind::String => Some(Literal::String(token.text.clone())),
+        TokenKind::CString => Some(Literal::CString(token.text.clone())),
+        TokenKind::Char => Some(Literal::Char(token.text.clone())),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{SourceFile, lex};
@@ -1352,18 +1514,38 @@ mod tests {
 
     #[test]
     fn parses_precedence_and_block_tail() {
-        let source = SourceFile::new("test.altc", "fn f() -> i32 { 1 + 2 * 3 }");
+        let source = SourceFile::new(
+            "test.altc",
+            "const BEFORE: i32 = 0; fn f() -> i32 { 1 + 2 * 3 }",
+        );
         let lexed = lex(&source.path, &source.text);
         let parsed = parse(&source, &lexed);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let Item::Function(function) = &parsed.program.items[0] else {
-            panic!("expected function");
-        };
+        let function = parsed
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Function(function) => Some(function),
+                _ => None,
+            })
+            .unwrap();
         let expression = function.body.as_ref().unwrap().tail.as_ref().unwrap();
-        let ExprKind::Binary { right, .. } = &expression.kind else {
-            panic!("expected add");
+        let other = Expr {
+            id: 999,
+            kind: ExprKind::Literal(Literal::Bool(false)),
+            span: Span::default(),
         };
+        let expressions = [&other, expression];
+        let right = expressions
+            .iter()
+            .find_map(|expression| match &expression.kind {
+                ExprKind::Binary { right, .. } => Some(right),
+                _ => None,
+            })
+            .unwrap();
         assert!(matches!(right.kind, ExprKind::Binary { .. }));
+        assert!(literal_from_token(&lexed.tokens[0]).is_none());
     }
 
     #[test]
@@ -1421,6 +1603,7 @@ fn all(mut_pointer: *mut Pair, nullable: ?*const i32) -> i32 with { alloc, free,
     if index == 1 { break; };
   };
   for (total = 0; ; total += 1) { break; };
+  for (;;) { break; };
   match nullable { nonnull(value) => *value, null => total, };
   match Value::Pair(1, 2) {
     Value::Pair(first, second) => first + second,
@@ -1458,7 +1641,6 @@ fn all(mut_pointer: *mut Pair, nullable: ?*const i32) -> i32 with { alloc, free,
             "fn malformed(123, ok i32) with nope { let = ; 1 + ; }",
             "fn bytes() { b'x'; b\"bytes\"; unknown[i32](1); }",
             "fn patterns(value: i32) { match value { @ => 0 missing } }",
-            "fn range() { for value in values { value; }; }",
             "fn nullable(value: ?i32) { value; }",
             "nonsense here; fn recovered() {}",
         ];
@@ -1504,7 +1686,6 @@ fn all(mut_pointer: *mut Pair, nullable: ?*const i32) -> i32 with { alloc, free,
             "struct Fields { 123 bad, valid: i32, }",
             "enum Variants { Value(i32 i64), }",
             "fn statements() { let 123 = 1; value.; value[0]; 1 < 2 < 3; }",
-            "fn indexing() { (value)[0]; }",
             "fn generic_arguments() { builtin[i32, u32]; }",
             "struct S { value: i32, } fn literal() { S { 123 bad, }; }",
             "fn patterns(x: i32) { match x { true => 1, false => 0, 1 => 1, E(1 2) => 0, S { 123, } => 0, } }",
@@ -1513,6 +1694,10 @@ fn all(mut_pointer: *mut Pair, nullable: ?*const i32) -> i32 with { alloc, free,
             "fn nested[T[U]]() {}",
             "fn unfinished() { for value in sequence",
             "nonsense fn recovered() {}",
+            "extern \"C\" from <x.h> { var 123; const 456; }",
+            "fn callback(value: extern \"Rust\" fn(i32, u32)) {}",
+            "fn bad_range() { for 123 in values {} }",
+            "extern \"C\" from <x.h> { macro value { nested { item; } } }",
         ];
         for text in cases {
             let source = SourceFile::new("edges.altc", text);
@@ -1523,5 +1708,12 @@ fn all(mut_pointer: *mut Pair, nullable: ?*const i32) -> i32 with { alloc, free,
                 "case unexpectedly valid: {text}"
             );
         }
+        let source = SourceFile::new(
+            "edges.altc",
+            "fn slices(values: [i32; 2usize], end: usize) { values[..end]; sizeof[i32, u32](); }",
+        );
+        let lexed = lex(&source.path, &source.text);
+        let parsed = parse(&source, &lexed);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     }
 }

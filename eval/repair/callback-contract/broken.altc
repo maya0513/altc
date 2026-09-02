@@ -1,0 +1,7 @@
+enum Failure {
+  Failed,
+}
+
+extern "C" from <stdlib.h> {
+  fn atexit(callback: extern "C" fn() with { raise[Failure] }) -> c_int with { raise[Failure] };
+}

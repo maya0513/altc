@@ -4,7 +4,10 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use altc_compiler::{AnalyzeOptions, CodegenOptions, SourceFile, analyze, emit_c};
+use altc_compiler::{
+    Analysis, AnalyzeOptions, CodegenOptions, ModuleLoadError, ModuleLoader, ModulePath,
+    SourceFile, analyze, analyze_project, emit_c,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -37,6 +40,10 @@ fn main() {
         &AnalyzeOptions::default(),
     );
     assert!(analyzed_showcase.succeeded());
+    let telemetry_root = include_str!("../../../examples/telemetry_pipeline/main.altc");
+    let telemetry_bytes = telemetry_source_bytes();
+    let analyzed_telemetry = analyze_telemetry(telemetry_root);
+    assert!(analyzed_telemetry.succeeded());
 
     let records = vec![
         measure(
@@ -144,6 +151,47 @@ fn main() {
                 );
             },
         ),
+        measure(
+            "analyze/telemetry-project",
+            telemetry_bytes,
+            Duration::from_millis(750),
+            || {
+                black_box(analyze_telemetry(black_box(telemetry_root)));
+            },
+        ),
+        measure(
+            "emit-c/telemetry-project",
+            telemetry_bytes,
+            Duration::from_millis(750),
+            || {
+                black_box(
+                    emit_c(
+                        black_box(&analyzed_telemetry),
+                        &CodegenOptions {
+                            unit_name: "telemetry_project".to_owned(),
+                        },
+                    )
+                    .unwrap(),
+                );
+            },
+        ),
+        measure(
+            "pipeline/telemetry-project",
+            telemetry_bytes,
+            Duration::from_millis(750),
+            || {
+                let analysis = analyze_telemetry(black_box(telemetry_root));
+                black_box(
+                    emit_c(
+                        &analysis,
+                        &CodegenOptions {
+                            unit_name: "telemetry_project".to_owned(),
+                        },
+                    )
+                    .unwrap(),
+                );
+            },
+        ),
     ];
 
     if let Some(path) = json_path {
@@ -166,6 +214,55 @@ fn main() {
             );
         }
     }
+}
+
+struct TelemetryLoader;
+
+impl ModuleLoader for TelemetryLoader {
+    fn load(&mut self, module: &ModulePath) -> Result<SourceFile, ModuleLoadError> {
+        let module_name = module.to_string();
+        let (path, source) = match module_name.as_str() {
+            "api" => (
+                "examples/telemetry_pipeline/api.altc",
+                include_str!("../../../examples/telemetry_pipeline/api.altc"),
+            ),
+            "bridge" => (
+                "examples/telemetry_pipeline/bridge.altc",
+                include_str!("../../../examples/telemetry_pipeline/bridge.altc"),
+            ),
+            "model" => (
+                "examples/telemetry_pipeline/model.altc",
+                include_str!("../../../examples/telemetry_pipeline/model.altc"),
+            ),
+            "processing" => (
+                "examples/telemetry_pipeline/processing.altc",
+                include_str!("../../../examples/telemetry_pipeline/processing.altc"),
+            ),
+            _ => return Err(ModuleLoadError::new(format!("unknown module `{module}`"))),
+        };
+        Ok(SourceFile::new(path, source))
+    }
+}
+
+fn analyze_telemetry(root: &str) -> Analysis {
+    analyze_project(
+        SourceFile::new("examples/telemetry_pipeline/main.altc", root),
+        &mut TelemetryLoader,
+        &AnalyzeOptions::default(),
+    )
+}
+
+fn telemetry_source_bytes() -> usize {
+    [
+        include_str!("../../../examples/telemetry_pipeline/main.altc"),
+        include_str!("../../../examples/telemetry_pipeline/api.altc"),
+        include_str!("../../../examples/telemetry_pipeline/bridge.altc"),
+        include_str!("../../../examples/telemetry_pipeline/model.altc"),
+        include_str!("../../../examples/telemetry_pipeline/processing.altc"),
+    ]
+    .iter()
+    .map(|source| source.len())
+    .sum()
 }
 
 fn parse_json_path() -> Option<PathBuf> {

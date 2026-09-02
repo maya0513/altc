@@ -6,7 +6,7 @@
       "line": 3
     },
     "file": "eval/repair/mutability/broken.altc",
-    "help": null,
+    "help": "add `mut` to the binding declaration or assign through a mutable pointer",
     "labels": [
       {
         "message": "",
@@ -14,6 +14,14 @@
         "span": {
           "end": 51,
           "start": 46
+        }
+      },
+      {
+        "message": "binding declared immutable here",
+        "primary": false,
+        "span": {
+          "end": 43,
+          "start": 24
         }
       }
     ],

@@ -139,6 +139,34 @@ fn builds_struct_payload_enum_match_and_for_loop() {
 }
 
 #[test]
+fn builds_and_runs_arrays_slices_and_range_for() {
+    let output = altc()
+        .args(["run", "tests/fixtures/sequences.altc"])
+        .output()
+        .expect("run sequence program");
+    assert_eq!(
+        output.status.code(),
+        Some(20),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn builds_and_runs_a_diamond_module_graph() {
+    let output = altc()
+        .args(["run", "tests/fixtures/modules/root.altc"])
+        .output()
+        .expect("run module graph");
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn preserves_lexical_shadowing_in_lowered_loop_blocks() {
     let output = altc()
         .args(["run", "tests/fixtures/shadowing.altc"])
@@ -183,6 +211,57 @@ fn verifies_ffi_and_defer_program() {
         .expect("run effect program");
     assert_eq!(output.status.code(), Some(7));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "cleanup\n");
+}
+
+#[test]
+fn verifies_and_runs_extern_objects_layout_enum_and_callbacks() {
+    let output = altc()
+        .args([
+            "run",
+            "tests/fixtures/ffi_core.altc",
+            "-I",
+            "tests/fixtures",
+        ])
+        .output()
+        .expect("run extern core program");
+    assert_eq!(
+        output.status.code(),
+        Some(17),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let summary = altc()
+        .args([
+            "check",
+            "tests/fixtures/ffi_core.altc",
+            "--show-memory-summary",
+            "--message-format",
+            "json",
+        ])
+        .output()
+        .expect("summarize extern core program");
+    assert_success(&summary);
+    let records = ndjson(&summary.stdout);
+    assert!(records.iter().any(|record| {
+        record["summary"]["categories"]
+            .as_array()
+            .is_some_and(|categories| categories.iter().any(|value| value == "indirect-call"))
+    }));
+}
+
+#[test]
+fn propagates_typed_errors_through_indirect_calls() {
+    let output = altc()
+        .args(["run", "tests/fixtures/raising_callback.altc"])
+        .output()
+        .expect("run raising callback program");
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -323,6 +402,86 @@ fn checks_and_runs_the_integrated_feature_showcase() {
 }
 
 #[test]
+fn checks_emits_builds_and_runs_the_module_telemetry_project() {
+    let root = workspace();
+    let project = "examples/telemetry_pipeline/main.altc";
+    let include = "examples/telemetry_pipeline";
+    let build_dir = root.join("target/altc/telemetry-pipeline-test");
+    fs::create_dir_all(&build_dir).unwrap();
+    let object = build_dir.join("telemetry.o");
+    let library = build_dir.join("libtelemetry.a");
+    let compile = Command::new("cc")
+        .current_dir(&root)
+        .args([
+            "-std=c11",
+            "-pedantic-errors",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-I",
+            include,
+            "-c",
+            "examples/telemetry_pipeline/telemetry.c",
+            "-o",
+        ])
+        .arg(&object)
+        .output()
+        .expect("compile telemetry C library");
+    assert_success(&compile);
+    let archive = Command::new("ar")
+        .arg("rcs")
+        .arg(&library)
+        .arg(&object)
+        .output()
+        .expect("archive telemetry C library");
+    assert_success(&archive);
+
+    let checked = altc()
+        .args(["check", project, "--ffi", "-I", include, "--cflag=-Werror"])
+        .output()
+        .expect("check telemetry project");
+    assert_success(&checked);
+
+    let emitted_dir = build_dir.join("emitted");
+    let emitted = altc()
+        .args(["emit-c", project, "--out-dir"])
+        .arg(&emitted_dir)
+        .output()
+        .expect("emit telemetry project");
+    assert_success(&emitted);
+    assert!(emitted_dir.join("main.c").is_file());
+    assert!(emitted_dir.join("main.h").is_file());
+
+    let executable = build_dir.join("telemetry-pipeline");
+    let built = altc()
+        .args(["build", project, "-I", include, "-L"])
+        .arg(&build_dir)
+        .args(["-l", "telemetry", "--cflag=-Werror", "-o"])
+        .arg(&executable)
+        .output()
+        .expect("build telemetry project");
+    assert_success(&built);
+    assert!(executable.is_file());
+
+    let executed = altc()
+        .args(["run", project, "-I", include, "-L"])
+        .arg(&build_dir)
+        .args(["-l", "telemetry", "--cflag=-Werror"])
+        .output()
+        .expect("run telemetry project");
+    assert_eq!(
+        executed.status.code(),
+        Some(48),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&executed.stdout),
+        "pipeline cleanup\n"
+    );
+}
+
+#[test]
 fn rejects_mismatched_ffi_contract() {
     let output = altc()
         .args([
@@ -336,6 +495,27 @@ fn rejects_mismatched_ffi_contract() {
         .expect("run mismatched FFI check");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ALTC6101"));
+}
+
+#[test]
+fn rejects_each_extern_object_layout_enum_and_callback_mismatch() {
+    for mismatch in ["global", "field", "enum", "callback"] {
+        let include = format!("tests/fixtures/ffi_core_mismatch/{mismatch}");
+        let output = altc()
+            .args(["check", "tests/fixtures/ffi_core.altc", "--ffi", "-I"])
+            .arg(&include)
+            .output()
+            .unwrap_or_else(|error| panic!("run {mismatch} FFI mismatch check: {error}"));
+        assert!(
+            !output.status.success(),
+            "{mismatch} mismatch unexpectedly passed"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ALTC6101"),
+            "{mismatch}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-02",
+  "base_commit": "working-tree-after-8c42435",
+  "command": "cargo xtask eval",
+  "scale": "1 (利用を妨げる) - 5 (自然で修正も容易)",
+  "scores": {
+    "syntax_writability": {
+      "score": 4.0,
+      "note": "array/sliceとrange-forは明示的なview mutabilityを保ちつつ短く書ける"
+    },
+    "semantic_consistency": {
+      "score": 4.0,
+      "note": "qualified module access、place、nullability、value-copyの境界が一貫する"
+    },
+    "effect_memory_comprehension": {
+      "score": 4.5,
+      "note": "moduleとindirect callをまたぐeffect/eventもfile付きsummaryから追跡できる"
+    },
+    "diagnostic_actionability": {
+      "score": 4.0,
+      "note": "主要repairはhelpと宣言labelを持つがcallback contractには派生診断が残る"
+    },
+    "c_interop_honesty": {
+      "score": 4.5,
+      "note": "object constness、layout、enum spelling、callbackを別々のRed testで検証する"
+    },
+    "repair_convergence": {
+      "score": 4.0,
+      "note": "12系統のbroken/fixed pairが明示的なsnapshot更新下で収束する"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+@entry
+fn application_main() -> c_int {
+  let values: [i32; 2usize] = [1, 2];
+  values[1usize] as c_int
+}

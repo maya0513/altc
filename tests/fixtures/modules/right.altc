@@ -1,0 +1,5 @@
+import common;
+
+pub fn value() -> c_int {
+  common::base() + 1
+}
